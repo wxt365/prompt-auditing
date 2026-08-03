@@ -1,0 +1,9 @@
+version: 1
+listen: 127.0.0.1:8080
+upstream: https://api.openai.com/v1
+policy_db: ../data/policy.db
+audit_db: ../data/audit.db
+max_body_bytes: 5242880
+max_concurrent_requests: 10
+audit_retention_days: 30
+audit_max_bytes: 104857600

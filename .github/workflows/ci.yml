@@ -1,0 +1,43 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.26.5
+          cache: true
+
+      - name: 静态检查
+        run: go vet ./...
+
+      - name: 单元、契约与集成竞态测试
+        run: go test -race ./...
+
+      - name: 编译真实 Codex 契约测试
+        run: go test -tags codex_contract -run '^$' ./tests/contract
+
+      - name: 交叉编译 Windows 原生 E2E
+        run: GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go test -c -tags native_e2e -o /tmp/codex-gateway-windows-e2e.test.exe ./tests/e2e
+
+      - name: 构建双平台发布产物
+        run: ./scripts/build-release.sh "0.0.0-ci.${{ github.run_number }}" "${GITHUB_SHA}"
+
+      - name: 保存交叉编译产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-gateway-cross-compiled
+          path: dist/
+          if-no-files-found: error

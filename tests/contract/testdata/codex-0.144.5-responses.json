@@ -1,0 +1,93 @@
+{
+  "client_metadata": {
+    "session_id": "session_example",
+    "thread_id": "thread_example",
+    "turn_id": "turn_example",
+    "x-codex-installation-id": "installation_example",
+    "x-codex-turn-metadata": "{\"request_kind\":\"turn\",\"sandbox\":\"seatbelt\"}",
+    "x-codex-window-id": "window_example"
+  },
+  "include": [
+    "reasoning.encrypted_content"
+  ],
+  "input": [
+    {
+      "type": "message",
+      "role": "developer",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "脱敏后的项目指令"
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "脱敏后的用户输入"
+        }
+      ]
+    }
+  ],
+  "instructions": "脱敏后的系统指令",
+  "model": "gpt-example",
+  "parallel_tool_calls": true,
+  "prompt_cache_key": "cache_example",
+  "reasoning": {
+    "effort": "high",
+    "summary": "auto"
+  },
+  "store": false,
+  "stream": true,
+  "text": {
+    "verbosity": "medium"
+  },
+  "tool_choice": "auto",
+  "tools": [
+    {
+      "type": "function",
+      "name": "shell_command",
+      "description": "执行受控命令",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "待执行命令"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "additionalProperties": false
+      },
+      "strict": false
+    },
+    {
+      "type": "custom",
+      "name": "apply_patch",
+      "description": "应用受控补丁",
+      "format": {
+        "type": "grammar",
+        "syntax": "lark",
+        "definition": "start: text"
+      }
+    },
+    {
+      "type": "tool_search",
+      "description": "搜索已登记工具",
+      "execution": "client",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "type": "web_search",
+      "external_web_access": false
+    }
+  ]
+}
