@@ -50,7 +50,7 @@ func Load(path string) (Config, error) {
 
 func applyDefaults(cfg *Config) {
 	if cfg.Listen == "" {
-		cfg.Listen = "127.0.0.1:8080"
+		cfg.Listen = "127.0.0.1:18080"
 	}
 	if cfg.MaxBodyBytes == 0 {
 		cfg.MaxBodyBytes = defaultBodyLimit
@@ -66,6 +66,17 @@ func applyDefaults(cfg *Config) {
 	}
 	cfg.UpstreamHeaderTimeout = 30 * time.Second
 	cfg.ShutdownTimeout = 15 * time.Second
+}
+
+// Prepare 供可视化配置复用启动参数校验，无需生成 YAML 文件。
+func Prepare(cfg Config, directory string) (Config, error) {
+	cfg.Path = filepath.Join(directory, "settings.db")
+	applyDefaults(&cfg)
+	resolvePaths(&cfg)
+	if err := validate(cfg); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
 }
 
 func resolvePaths(cfg *Config) {
@@ -96,12 +107,8 @@ func validate(cfg Config) error {
 	if err != nil || port < 1 || port > 65535 {
 		return errors.New("listen 端口必须在 1 到 65535 之间")
 	}
-	upstream, err := url.Parse(cfg.Upstream)
-	if err != nil || upstream.Scheme != "https" || upstream.Host == "" {
-		return errors.New("upstream 必须是固定的 HTTPS URL")
-	}
-	if upstream.RawQuery != "" || upstream.Fragment != "" || upstream.User != nil {
-		return errors.New("upstream 不得包含用户信息、查询参数或片段")
+	if err := ValidateUpstream(cfg.Upstream); err != nil {
+		return err
 	}
 	if cfg.PolicyDB == "." || cfg.AuditDB == "." || cfg.PolicyDB == "" || cfg.AuditDB == "" {
 		return errors.New("policy_db 和 audit_db 不能为空")
@@ -111,6 +118,18 @@ func validate(cfg Config) error {
 	}
 	if cfg.MaxBodyBytes <= 0 || cfg.MaxConcurrentRequests <= 0 || cfg.AuditRetentionDays <= 0 || cfg.AuditMaxBytes <= 0 {
 		return errors.New("请求限制与审计保留参数必须大于零")
+	}
+	return nil
+}
+
+// ValidateUpstream 供配置保存及手动连接检查共用固定上游地址校验。
+func ValidateUpstream(value string) error {
+	upstream, err := url.Parse(value)
+	if err != nil || (upstream.Scheme != "https" && upstream.Scheme != "http") || upstream.Host == "" {
+		return errors.New("upstream 必须是固定的 HTTP 或 HTTPS URL")
+	}
+	if upstream.RawQuery != "" || upstream.Fragment != "" || upstream.User != nil {
+		return errors.New("upstream 不得包含用户信息、查询参数或片段")
 	}
 	return nil
 }

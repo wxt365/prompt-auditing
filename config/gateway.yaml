@@ -1,5 +1,5 @@
 version: 1
-listen: 127.0.0.1:8080
+listen: 127.0.0.1:18080
 upstream: https://api.openai.com/v1
 policy_db: ../data/policy.db
 audit_db: ../data/audit.db

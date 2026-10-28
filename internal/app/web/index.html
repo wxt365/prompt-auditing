@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>安全网关 · 本地管理</title>
+  <link rel="icon" type="image/svg+xml" href="/logo.svg">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header><div class="header-inner">
+    <div class="brand"><img class="brand-icon" src="/logo.svg" alt="" width="36" height="36"><div><strong>安全网关</strong><small>本地管理</small></div></div>
+    <nav aria-label="管理导航"><button class="tab active" data-tab="connection">连接设置</button><button class="tab" data-tab="rules">安全规则</button><button class="tab" data-tab="audits">审计日志</button><button class="tab" data-tab="live">实时日志</button><button class="tab" data-tab="runtime">运行状态</button></nav>
+    <span id="status" role="status">正在连接…</span>
+  </div></header>
+  <main>
+    <div id="notice" role="status" hidden></div>
+    <section id="connection" class="panel">
+      <div class="section-heading"><div><h1>连接设置</h1><p>支持 Responses 和 Chat Completions，普通响应与流式响应共用安全规则。</p></div></div>
+      <p id="setup-state" class="warning" role="status" hidden>首次使用：请填写实际使用的上游 API 地址并保存。完成配置前，本地代理不会启动。</p>
+      <form id="connection-form">
+        <div class="form-grid">
+          <label>本地监听端口<input name="listen_port" type="number" min="1" max="65535" step="1" required placeholder="18080"><small id="listen-hint">默认 18080，仅监听本机；不能与其他服务共用端口。</small></label>
+          <label>上游 API 地址<input name="upstream" type="url" required placeholder="https://your-api.example/v1"><small>填写实际使用的 API 基础地址，程序自动附加对应接口路径。</small></label>
+          <label class="full">认证方式<select name="auth_mode"><option value="client">沿用客户端认证（无需在此填写 Key）</option><option value="gateway">由网关配置上游 API Key</option></select><small id="auth-hint">客户端继续使用现有认证配置，网关将认证信息转发到固定上游。</small></label>
+          <label class="full" id="upstream-key-field" hidden>上游 API Key<input name="upstream_key" type="password" autocomplete="new-password" placeholder="填写上游密钥"><small id="key-state">密钥使用系统加密保护保存，不会回显。</small></label>
+        </div>
+        <div class="upstream-check"><button id="check-upstream" type="button">检查上游连接</button><span id="upstream-check-result" role="status">检查当前地址下的 /models 路径，无需保存；不携带认证，不调用模型。</span></div>
+        <p id="http-warning" class="warning" hidden>当前上游使用 HTTP，请求内容和认证信息将以明文传输。</p>
+        <details><summary>请求限制与审计保留</summary><div class="form-grid advanced">
+          <label>最大请求体（MiB）<input name="body_mib" type="number" min="0.01" max="100" step="0.01" required></label>
+          <label>最大并发请求数<input name="max_concurrent_requests" type="number" min="1" max="1000" required></label>
+          <label>审计保留天数<input name="audit_retention_days" type="number" min="1" max="3650" required></label>
+          <label>审计容量上限（MiB）<input name="audit_mib" type="number" min="1" max="102400" required></label>
+        </div></details>
+        <div class="actions"><button type="submit" class="primary">保存并应用</button><span>应用时会重新启动代理，正在处理的请求最多等待 15 秒。</span></div>
+      </form>
+      <p class="hint">本地代理运行不代表上游可用。连接检查仅验证网络与 HTTP 响应；返回 401、404 或 405 也表示已收到响应，密钥、模型和完整调用仍需客户端验证。此监听端口保存后保持固定；管理页使用独立端口，从托盘或菜单栏打开。</p>
+      <div class="subsection"><h2>客户端接入</h2><p>将客户端 API 基础地址设置为 <code id="client-base">—</code>，<span id="client-auth">继续使用客户端现有的认证密钥。</span></p><div class="endpoint-row"><code>POST /v1/responses</code><code>POST /v1/chat/completions</code><button id="copy-token" type="button" hidden>复制本地令牌</button></div><small id="client-auth-detail">网关不读取客户端认证文件，不保存请求中的认证密钥；上游负责验证凭证。</small></div>
+    </section>
+    <section id="rules" class="panel" hidden>
+      <div class="section-heading"><div><h1>安全规则</h1><p>先替换，再检查拦截规则。替换后仍命中违禁内容才阻断；替换执行一次，不会级联替换。</p></div><button id="add-rule" type="button">＋ 新增规则</button></div>
+      <div class="table-scroll"><table><thead><tr><th>启用</th><th>规则名称</th><th>类型</th><th>动作</th><th>匹配内容</th><th>操作</th></tr></thead><tbody id="rules-body"></tbody></table></div>
+      <div class="actions"><button id="save-rules" type="button" class="primary">保存并应用规则</button><span id="rules-state">—</span></div>
+      <p class="hint">工具名、模型名和结构字段会参与检测；脱敏命中这些位置时会改为阻断。Responses 图片保持原样转发，图片内的文字不参与审计；音频及文件附件暂不支持。</p>
+    </section>
+    <section id="audits" class="panel" hidden>
+      <div class="section-heading"><div><h1>审计日志</h1><p>查看请求处置结果及命中规则。时间按本机时区显示，默认查询阻断记录。</p></div></div>
+      <form id="audit-filter" class="audit-filter">
+        <label>处置动作<select name="action"><option value="block">阻断 / 拒绝</option><option value="">全部</option><option value="mask">脱敏</option><option value="warn">告警</option><option value="allow">放行</option></select></label>
+        <label>规则名称<input name="rule_name" maxlength="128" placeholder="包含匹配，例如 敏感字替换"></label>
+        <label>请求 ID<input name="request_id" maxlength="128" placeholder="精确匹配 req_…"></label>
+        <label>开始时间<input name="since" type="datetime-local" step="1"></label>
+        <label>结束时间<input name="until" type="datetime-local" step="1"></label>
+        <div class="audit-filter-actions"><button type="submit" class="primary">查询 / 刷新</button><button id="audit-reset" type="button">重置</button></div>
+      </form>
+      <div class="table-scroll"><table class="audit-table"><thead><tr><th>时间</th><th>请求 ID</th><th>动作</th><th>结果</th><th>命中次数</th><th>操作</th></tr></thead><tbody id="audit-body"><tr><td colspan="6">点击查询加载审计日志。</td></tr></tbody></table></div>
+      <div class="actions"><button id="audit-prev" type="button" disabled>上一页</button><button id="audit-next" type="button" disabled>下一页</button><span id="audit-page">每页最多 50 条</span></div>
+      <dialog id="audit-detail" aria-labelledby="audit-detail-title">
+        <div class="audit-dialog-heading"><h2 id="audit-detail-title">请求详情</h2><button id="audit-close" type="button" autofocus>关闭</button></div>
+        <div class="audit-dialog-content">
+        <p id="audit-verdict" class="audit-verdict" role="status"></p>
+        <dl id="audit-summary" class="status-list"></dl>
+        <h2 class="audit-hits-title">命中规则</h2><p id="audit-reason"></p>
+        <div class="table-scroll"><table class="audit-hit-table"><thead><tr><th>规则名称</th><th>规则类型</th><th>本次判定</th><th>命中关键字</th></tr></thead><tbody id="audit-hits"></tbody></table></div>
+        <section id="audit-request" class="subsection" hidden>
+          <div class="section-heading"><h2>阻断时的请求内容</h2><div class="request-tools"><button id="show-audit-request" type="button" aria-expanded="false" aria-controls="audit-request-content">展开请求内容</button><a id="download-audit-request" hidden>下载完整 JSON</a></div></div>
+          <p class="hint">展示审计库保存的原始请求，认证凭证已脱敏。高亮表示已保存的命中词在原文中的出现位置，可能包含替换规则命中；替换后才产生的命中词可能不在原文中。正则和私网 IPv4 规则未保存命中文本，暂不高亮。</p>
+          <div id="audit-request-content" hidden><p id="audit-request-state" role="status"></p><pre id="audit-request-body" tabindex="0" aria-label="阻断请求 JSON"></pre></div>
+        </section>
+        </div>
+      </dialog>
+      <p class="hint">请求 ID 对应响应头 x-gateway-request-id。规则名称和版本取自请求发生时的记录；升级前未保存名称的历史记录显示原标识。正则和私网 IPv4 规则不保存原始命中文本。</p>
+    </section>
+    <section id="live" class="panel" hidden>
+      <div class="section-heading"><div><h1>实时日志</h1><p>开启后查看请求的处理阶段、响应状态和耗时。关闭页面后继续采集，重启程序后默认关闭。</p></div><button id="live-toggle" type="button" class="primary" disabled>正在读取…</button></div>
+      <div class="live-toolbar">
+        <label class="live-search">筛选<input id="live-search" placeholder="请求 ID、接口、规则名称或错误代码"></label>
+        <label class="check"><input id="live-errors" type="checkbox">仅异常</label>
+        <button id="live-clear" type="button">清空实时日志</button>
+      </div>
+      <p id="live-state" role="status">正在读取采集状态…</p>
+      <p id="live-error" class="warning" role="status" hidden></p>
+      <div class="table-scroll live-scroll"><table class="live-table"><thead><tr><th>时间</th><th>请求 ID</th><th>接口</th><th>当前阶段</th><th>本地 HTTP</th><th>上游 HTTP</th><th>耗时</th><th>审计动作</th><th>说明 / 命中规则</th></tr></thead><tbody id="live-body"><tr><td colspan="9">开启后显示新进入网关的请求。</td></tr></tbody></table></div>
+      <p class="hint">每秒刷新，内存保留最近 500 条请求，含处理中和拒绝的请求。仅采集请求元信息，不记录认证头、请求正文或响应正文。命中规则最多显示前 20 个名称，完整明细可按请求 ID 查询审计日志。关闭采集或清空后，在途请求停止跟踪；实际代理请求继续执行。</p>
+    </section>
+    <section id="runtime" class="panel" hidden>
+      <div class="section-heading"><div><h1>运行状态</h1><p>关闭此页面后代理继续运行；从 Windows 托盘或 macOS 顶部菜单栏选择“退出”可关闭程序。</p></div></div>
+      <dl class="status-list"><div><dt>代理服务</dt><dd id="runtime-state">—</dd></div><div><dt>审计服务</dt><dd id="audit-state">—</dd></div><div><dt>当前规则版本</dt><dd id="rule-version">—</dd></div><div><dt>软件版本</dt><dd id="app-version">—</dd></div><div><dt>数据目录</dt><dd id="data-directory">—</dd></div><div><dt>运行提示</dt><dd id="runtime-error">—</dd></div></dl>
+      <div class="actions"><button id="start-gateway" type="button" class="primary">启动 / 重启代理</button><button id="stop-gateway" type="button">停止代理</button></div>
+    </section>
+    <footer>仅在本机提供管理界面 <span>设置自动保存到当前用户的数据目录</span></footer>
+  </main>
+  <dialog id="rule-dialog">
+    <form id="rule-form"><h2 id="rule-title">新增规则</h2><div class="form-grid">
+      <label class="full">规则名称<input name="name" maxlength="128" required placeholder="例如 敏感字替换"><small>支持中文，最多 128 个字符。规则标识由程序自动生成，编辑名称不会改变标识。</small></label>
+      <label>规则类型<select name="type"><option value="keyword">关键字</option><option value="keyword_mapping">关键字替换</option><option value="regex">正则表达式</option><option value="private_ipv4">私网 IPv4</option></select></label>
+      <label>处置动作<select name="action"><option value="block">阻断</option><option value="mask">脱敏</option><option value="warn">告警并放行</option><option value="allow">放行</option></select></label>
+      <label class="full" id="values-label"><span id="values-title">关键字（每行一个）</span><textarea name="values" rows="5"></textarea></label>
+      <label class="full" id="replacement-label" hidden>正则替换值<input name="replacement" placeholder="可以使用 $1 等捕获组"></label>
+      <label class="check"><input name="case_sensitive" type="checkbox">区分大小写</label><label class="check"><input name="enabled" type="checkbox" checked>启用规则</label>
+    </div><p id="rule-error" class="warning" hidden></p><div class="actions"><button type="submit" class="primary">确定</button><button id="cancel-rule" type="button">取消</button></div></form>
+  </dialog>
+</body>
+</html>

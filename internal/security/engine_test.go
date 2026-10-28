@@ -93,13 +93,8 @@ func TestEngineDetectsOnlyValidPrivateIPv4(t *testing.T) {
 	}
 }
 
-func TestExtractRejectsUnknownTextAndAttachments(t *testing.T) {
+func TestExtractRejectsUnsupportedAttachments(t *testing.T) {
 	tests := []string{
-		`{"model":"gpt-test","future_text":"secret"}`,
-		`{"model":"gpt-test","input":[{"type":"message","role":"user","future_text":"secret","content":"normal"}]}`,
-		`{"model":"gpt-test","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"normal","future_text":"secret"}]}]}`,
-		`{"model":"gpt-test","tools":[{"type":"function","name":"known","description":"normal","parameters":{"type":"object"},"future_text":"secret"}]}`,
-		`{"model":"gpt-test","tools":[{"type":"future_tool","description":"secret"}]}`,
 		`{"model":"gpt-test","input":[{"type":"input_image","image_url":"https://example.invalid/a.png"}]}`,
 	}
 	for _, body := range tests {
@@ -174,7 +169,7 @@ func TestExtractSupportsRegisteredCodexToolTypes(t *testing.T) {
 
 func TestExtractPreservesTextOrderAndRejectsDuplicateKeys(t *testing.T) {
 	payload := mustPayload(t, `{"instructions":"先出现","input":"后出现","model":"gpt-test"}`)
-	if len(payload.Texts) != 3 || payload.Texts[0].Value != "先出现" || payload.Texts[1].Value != "后出现" || payload.Texts[2].Value != "gpt-test" {
+	if len(payload.Texts) != 6 || payload.Texts[1].Value != "先出现" || payload.Texts[3].Value != "后出现" || payload.Texts[5].Value != "gpt-test" {
 		t.Fatalf("文本提取顺序错误: %#v", payload.Texts)
 	}
 	if _, err := Extract([]byte(`{"input":"one","input":"two"}`)); err == nil {

@@ -44,7 +44,6 @@ func (a *memoryAuditor) Write(event audit.Event) error {
 	return nil
 }
 
-func (a *memoryAuditor) Fingerprint([]byte) string { return "fingerprint" }
 func (a *memoryAuditor) Healthy() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -131,6 +130,40 @@ func TestNewHandlerRejectsSharedLocalAndUpstreamSecret(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("本地令牌与上游 API Key 相同时必须拒绝启动")
+	}
+}
+
+func TestNewHandlerRejectsUnsupportedUpstreamScheme(t *testing.T) {
+	parsed, err := url.Parse("ftp://example.invalid/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := security.NewEngine(storage.RuleSet{Version: "1", DefaultAction: storage.DefaultAction})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = NewHandler(Options{
+		Upstream: parsed, Client: upstreamClient(), Engine: engine, Audit: &memoryAuditor{failAfter: -1},
+		LocalToken: testLocalToken, UpstreamKey: "upstream-key", OSUser: "developer",
+		Limits: config.LimitsConfig{MaxCompressedBytes: 1 << 20, MaxDecompressedBytes: 1 << 20, MaxConcurrent: 10},
+	})
+	if err == nil {
+		t.Fatal("非 HTTP/HTTPS 上游未被拒绝")
+	}
+}
+
+func TestHTTPUpstreamWithTrailingSlashUsesResponsesPath(t *testing.T) {
+	var path string
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		path = request.URL.Path
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, `{"ok":true}`)
+	}))
+	defer upstream.Close()
+	handler := newTestHandler(t, upstream.URL+"/v1/", &memoryAuditor{failAfter: -1}, nil)
+	response := performRequest(handler, []byte(`{"model":"gpt-test","input":"normal"}`), "")
+	if response.Code != http.StatusOK || path != "/v1/responses" {
+		t.Fatalf("HTTP upstream 路径错误: status=%d path=%q", response.Code, path)
 	}
 }
 
@@ -418,10 +451,15 @@ func TestUpstreamStatusAndBodyAreForwardedWithoutRetry(t *testing.T) {
 				_, _ = writer.Write([]byte(`{"error":"test"}`))
 			}))
 			defer upstream.Close()
-			handler := newTestHandler(t, upstream.URL, &memoryAuditor{failAfter: -1}, nil)
+			auditor := &memoryAuditor{failAfter: -1}
+			handler := newTestHandler(t, upstream.URL, auditor, nil)
 			response := performRequest(handler, []byte(`{"model":"gpt-test","input":"normal"}`), "")
 			if response.Code != status || response.Body.String() != `{"error":"test"}` || calls.Load() != 1 {
 				t.Fatalf("透传错误: status=%d body=%q calls=%d", response.Code, response.Body.String(), calls.Load())
+			}
+			if len(auditor.events) != 2 || auditor.events[1].Result != "upstream_http_error" ||
+				auditor.events[1].ErrorCode != "upstream_http_error" || auditor.events[1].UpstreamStatus == nil || *auditor.events[1].UpstreamStatus != status {
+				t.Fatalf("上游错误审计结果不正确: %+v", auditor.events)
 			}
 		})
 	}
@@ -655,11 +693,11 @@ func TestUnsupportedPayloadAndAuditFailureNeverReachUpstream(t *testing.T) {
 	defer upstream.Close()
 
 	handler := newTestHandler(t, upstream.URL, &memoryAuditor{failAfter: -1}, nil)
-	unsupported := performRequest(handler, []byte(`{"model":"gpt-test","unknown_text":"secret"}`), "")
+	unsupported := performRequest(handler, []byte(`{"model":"gpt-test","input":{}}`), "")
 	if unsupported.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("未知文本字段状态码 = %d", unsupported.Code)
 	}
-	nested := performRequest(handler, []byte(`{"model":"gpt-test","input":[{"type":"message","role":"user","content":"normal","future_text":"secret"}]}`), "")
+	nested := performRequest(handler, []byte(`{"model":"gpt-test","input":[{"type":"message","role":"user","content":42}]}`), "")
 	if nested.Code != http.StatusUnprocessableEntity || decodeErrorCode(t, nested) != "unsupported_payload" {
 		t.Fatalf("嵌套未知文本字段响应 = %d %s", nested.Code, nested.Body.String())
 	}

@@ -24,17 +24,21 @@ fi
 
 release_directory="${RELEASE_OUTPUT_DIR:-dist}"
 windows_name="codex-gateway-windows-amd64.exe"
+desktop_name="codex-gateway-desktop-windows-amd64.exe"
 darwin_name="codex-gateway-darwin-arm64"
 linker_flags="-s -w -X main.version=${release_version} -X main.commit=${release_commit}"
 
 mkdir -p "${release_directory}"
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "${linker_flags}" -o "${release_directory}/${windows_name}" ./cmd/codex-gateway
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "${linker_flags} -H=windowsgui" -o "${release_directory}/${desktop_name}" ./cmd/codex-gateway-desktop
 CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "${linker_flags}" -o "${release_directory}/${darwin_name}" ./cmd/codex-gateway
 
 go version -m "${release_directory}/${windows_name}"
+go version -m "${release_directory}/${desktop_name}"
 go version -m "${release_directory}/${darwin_name}"
 if command -v file >/dev/null 2>&1; then
   file "${release_directory}/${windows_name}"
+  file "${release_directory}/${desktop_name}"
   file "${release_directory}/${darwin_name}"
 fi
 
@@ -49,6 +53,7 @@ checksum() {
 
 {
   printf '%s  %s\n' "$(checksum "${release_directory}/${windows_name}")" "${windows_name}"
+  printf '%s  %s\n' "$(checksum "${release_directory}/${desktop_name}")" "${desktop_name}"
   printf '%s  %s\n' "$(checksum "${release_directory}/${darwin_name}")" "${darwin_name}"
 } >"${release_directory}/SHA256SUMS"
 

@@ -214,7 +214,7 @@ func windowsGatewayRequest(t *testing.T, baseURL, body string) *http.Response {
 
 func assertWindowsBlockedAudit(t *testing.T, path string) {
 	t.Helper()
-	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: filepath.ToSlash(path)}).String())
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: "/" + filepath.ToSlash(path)}).String())
 	if err != nil {
 		t.Fatal(err)
 	}

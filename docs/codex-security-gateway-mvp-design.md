@@ -3,14 +3,16 @@
 | 属性 | 内容 |
 | --- | --- |
 | 文档状态 | 实现中，外部验收未闭合 |
-| 版本 | 0.6 |
-| 日期 | 2026-08-02 |
-| 适用范围 | Codex CLI、Windows/macOS 本地部署、OpenAI GPT 系列模型 |
+| 版本 | 0.7 |
+| 日期 | 2026-08-04 |
+| 适用范围 | Codex CLI、Windows/macOS 本地部署、OpenAI Responses 兼容模型服务 |
 | 核心目标 | 在模型请求离开开发者电脑前完成检测、处置和审计 |
+
+> 2026-10-28 协议演进：当前桌面版支持 Responses 和 Chat Completions；普通 JSON 扩展不再因未登记而拒绝，统一递归审计并保留转发，已知字段类型和附件限制继续校验。以下旧 MVP 的逐字段拒绝要求，以 [JSON 扩展兼容](json-extensions-20261028.md) 和 [桌面模式](desktop-mode.md) 的现行策略为准。
 
 ## 1. 结论与边界
 
-Codex Security Gateway 是运行在开发者本机的单上游安全代理。Codex CLI 的模型请求必须先经过 Gateway；Gateway 对请求中可检查的全部文本内容执行规则检测，再按策略阻断、脱敏或记录告警，最后将允许的请求转发至固定的 OpenAI API 上游。
+Codex Security Gateway 是运行在开发者本机的单上游安全代理。Codex CLI 的模型请求必须先经过 Gateway；Gateway 对请求中可检查的全部文本内容执行规则检测，再按策略阻断、脱敏或记录告警，最后将允许的请求转发至配置中固定的 OpenAI Responses 兼容上游。
 
 MVP 解决的是开发者误提交明文敏感信息的风险，不是完整的数据防泄漏系统。仅修改 Codex Endpoint 不能阻止开发者绕过 Gateway，也不能证明企业敏感信息绝不外泄。强制接入需要后续结合终端管控、托管配置和网络出口策略。
 
@@ -27,7 +29,7 @@ MVP 解决的是开发者误提交明文敏感信息的风险，不是完整的�
 
 - MVP 只代理 `POST /v1/responses`，不承诺兼容全部 OpenAI API。
 - MVP 只支持 HTTP 请求和 SSE 流式响应，不支持 Responses WebSocket。
-- Gateway 使用固定 OpenAI 上游，不提供模型切换、路由或 Provider 管理。
+- Gateway 使用配置中固定的 OpenAI Responses 兼容上游，不提供模型切换、路由或 Provider 管理；上游协议支持 HTTP 和 HTTPS。
 - 扫描范围是出站请求中所有已支持的文本字段，不只扫描终端中用户手工输入的一句话。
 - 未命中风险规则时默认 `allow`；检测器异常、请求无法解析或内容无法检查时失败关闭并拒绝发送。
 - `warn` 在 MVP 中表示“记录告警并继续发送”，不提供交互式二次确认。
@@ -121,14 +123,14 @@ AI Coding 工具会把用户输入、代码上下文、项目指令和工具执�
 flowchart LR
     D["开发人员"] --> C["Codex CLI"]
     C -->|"HTTP /v1/responses"| G["本机 Security Gateway"]
-    G -->|"HTTPS /v1/responses"| O["OpenAI API"]
+    G -->|"HTTP/HTTPS /v1/responses"| O["固定上游 API"]
     G --> C["gateway.yaml"]
     G --> R["policy.db"]
     G --> A["audit.db"]
 ```
 
 - Codex 到 Gateway：仅允许回环网络访问，但仍要校验本地访问令牌。
-- Gateway 到 OpenAI：必须使用 HTTPS 并校验证书。
+- Gateway 到固定上游：支持 HTTP 和 HTTPS；HTTPS 必须校验证书，HTTP 会明文传输 Prompt 和认证信息，只能在明确接受风险的受控网络中使用。
 - `gateway.yaml`、`policy.db`、`audit.db` 及 SQLite WAL/SHM 文件：依赖本机文件权限保护。
 - Gateway 进程：持有上游 API Key，日志和错误信息不得泄露该密钥。
 
@@ -188,8 +190,8 @@ flowchart TB
 4. 解析 JSON；解析失败直接拒绝，不转发上游。
 5. 按已验证的字段映射提取全部可检查文本。
 6. 对检测副本执行 Unicode 规范化和大小写标准化，原请求暂不修改。
-7. 执行关键词和正则规则，记录规则 ID、类型、位置和动作；关键字阻断规则同时保留命中的原始关键字。
-8. 按 `block > mask > warn > allow` 计算最终动作。
+7. 先对原文匹配替换规则并预演一次性非级联替换，再对替换后的文本匹配阻断、告警和放行规则；记录两个阶段的规则 ID、名称、类型、位置和动作，关键字命中保存各阶段匹配到的文本。
+8. 替换后仍命中阻断规则，或不可安全替换的位置命中替换规则时，最终动作为 `block`；否则有替换时为 `mask`，无替换时按 `warn > allow` 决策。此流程取代原版对原文统一按动作优先级决策的行为。
 9. `block`：写入包含阻断时间、全部命中关键字和完整 JSON 请求体的决策审计，再返回 HTTP `403` 和固定提示“内容审计命中风险规则，请调整输入后重试”，上游调用数必须为零。
 10. `mask`：按多组“源关键字 → 目标字”映射，从后向前执行一次性、非级联替换，成功写入决策事件后转发新请求。
 11. `warn`：成功写入告警决策事件后原样转发，不等待用户确认。
@@ -203,12 +205,12 @@ flowchart TB
 
 | 编号 | 需求 |
 | --- | --- |
-| FR-PXY-001 | Gateway 必须仅监听 `127.0.0.1` 或 `::1`，默认端口为 `8080`。 |
+| FR-PXY-001 | Gateway 必须仅监听 `127.0.0.1` 或 `::1`，默认端口为 `18080`。 |
 | FR-PXY-002 | Gateway 必须支持 `POST /v1/responses`。 |
 | FR-PXY-003 | Gateway 必须支持普通 JSON 响应和 `text/event-stream` 响应。 |
 | FR-PXY-004 | Gateway 必须支持无压缩和 `gzip` 请求体。 |
 | FR-PXY-005 | Gateway 必须保持上游状态码、SSE 事件顺序和正文，不得缓存完整流式响应后再返回。 |
-| FR-PXY-006 | Gateway 必须使用启动配置中的固定 HTTPS 上游，不得接受请求参数或 Header 指定转发目标。 |
+| FR-PXY-006 | Gateway 必须使用启动配置中的固定 HTTP 或 HTTPS 上游，不得接受请求参数或 Header 指定转发目标；HTTP 模式必须输出明文传输警告。 |
 | FR-PXY-007 | Gateway 必须删除 hop-by-hop Header，并重新计算被修改请求的 `Content-Length` 和 `Content-Encoding`。 |
 | FR-PXY-008 | Gateway 不得转发 Codex 使用的本地访问令牌；必须改用 Gateway 进程环境中的上游 API Key。 |
 | FR-PXY-009 | 上游超时、断流和 4xx/5xx 应保留可诊断信息，但不得回显密钥或完整请求。 |
@@ -240,7 +242,7 @@ flowchart TB
 | FR-RUL-002 | 每条规则必须包含唯一 ID、类型、启用状态、动作，以及该类型要求的匹配配置。 |
 | FR-RUL-003 | Gateway 启动时必须完成 SQLite Schema 迁移状态、正则可编译性、规则 ID 唯一性和映射冲突校验。 |
 | FR-RUL-004 | MVP 在启动时从 `policy.db` 加载不可变规则快照，规则修改后重启生效，不实现热更新。 |
-| FR-RUL-005 | 动作优先级固定为 `block > mask > warn > allow`。 |
+| FR-RUL-005 | 先执行一次替换，再检查剩余内容；仍命中阻断规则或不可安全替换时阻断，否则替换后放行。有替换时最终动作为 `mask`，无替换时按 `warn > allow` 处理。 |
 | FR-RUL-006 | `block` 必须保证请求未连接上游。 |
 | FR-RUL-007 | `mask` 必须只修改命中区间，多个区间重叠时使用确定性合并规则。 |
 | FR-RUL-008 | `warn` 必须记录告警并继续请求，不得伪装成交互确认。 |
@@ -248,7 +250,7 @@ flowchart TB
 | FR-RUL-010 | 关键字替换规则必须支持配置多组“源关键字 `source` → 目标字 `target`”映射。 |
 | FR-RUL-011 | 同一源关键字只能配置一个目标字；源关键字和目标字均不得为空，冲突配置必须导致启动失败。 |
 | FR-RUL-012 | 多组替换必须基于原始请求一次性执行，替换产生的目标字不得再次触发其他替换规则。 |
-| FR-RUL-013 | 关键字拦截规则必须支持配置多个关键字，任意一个关键字命中即产生 `block` 动作。 |
+| FR-RUL-013 | 关键字拦截规则必须支持配置多个关键字，任意一个关键字在替换后内容中命中即产生 `block` 动作。 |
 | FR-RUL-014 | 同一请求命中多个拦截关键字时，必须记录全部去重后的命中关键字。 |
 
 规则通过本地 CLI 写入 `policy.db`，示例：
@@ -361,7 +363,7 @@ codex-gateway policy add-private-ipv4 \
 
 ```yaml
 version: 1
-listen: 127.0.0.1:8080
+listen: 127.0.0.1:18080
 upstream: https://api.openai.com/v1
 policy_db: data/policy.db
 audit_db: data/audit.db
@@ -434,7 +436,7 @@ PRAGMA busy_timeout = 5000;
 ### 9.1 安全性
 
 - 所有安全检测和审计前置失败均采用失败关闭；MVP 不提供失败开放模式。
-- 上游 TLS 证书校验不得关闭。
+- HTTPS 上游的 TLS 证书校验不得关闭；HTTP 上游必须明确提示 Prompt 和认证信息将明文传输。
 - 上游 Host 必须来自启动配置，不得形成开放代理或 SSRF 通道。
 - 本地访问令牌和上游 API Key 必须分离。
 - 错误堆栈默认只写本机诊断日志，面向 Codex 的响应使用稳定错误码。
@@ -473,7 +475,7 @@ model_provider = "security_gateway"
 
 [model_providers.security_gateway]
 name = "Codex Security Gateway"
-base_url = "http://127.0.0.1:8080/v1"
+base_url = "http://127.0.0.1:18080/v1"
 env_key = "CODEX_GATEWAY_TOKEN"
 wire_api = "responses"
 ```
@@ -616,10 +618,10 @@ Codex CLI
     |
     | HTTP + local token
     v
-127.0.0.1:8080
+127.0.0.1:18080
 Codex Security Gateway
     |
-    | HTTPS + OpenAI API Key
+    | HTTP/HTTPS + 上游 API Key
     v
 api.openai.com
 ```

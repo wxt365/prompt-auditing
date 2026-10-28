@@ -54,31 +54,35 @@ func (e *Engine) Inspect(ctx context.Context, payload Payload) (Decision, error)
 			return Decision{}, err
 		}
 		var textMatches []Match
-		for _, rule := range e.rules.Rules {
-			if !rule.Enabled {
-				continue
+		// 先基于原文计算一次性替换，再对替换结果执行其他规则。
+		// 这里只预演文本，阻断审计仍保留原请求，实际转发前才写入替换结果。
+		checked := text
+		for _, masking := range []bool{true, false} {
+			var stageMatches []Match
+			for _, rule := range e.rules.Rules {
+				if !rule.Enabled || (rule.Action == ActionMask) != masking {
+					continue
+				}
+				remaining := MaxMatchesPerInspection - len(decision.Matches) - len(textMatches) - len(stageMatches)
+				matches, err := inspectRule(ctx, checked, rule, remaining)
+				if err != nil {
+					return Decision{}, err
+				}
+				stageMatches = append(stageMatches, matches...)
 			}
-			remaining := MaxMatchesPerInspection - len(decision.Matches) - len(textMatches)
-			matches, err := inspectRule(ctx, text, rule, remaining)
-			if err != nil {
-				return Decision{}, err
+			if masking && text.Maskable {
+				// 审计与实际替换采用相同的重叠区间选择，未采用的替换不算命中。
+				stageMatches = selectNonOverlapping(stageMatches)
+				checked.Value = applyNonOverlapping(text.Value, stageMatches)
 			}
-			textMatches = append(textMatches, matches...)
-			for _, match := range matches {
+			sortMatches(stageMatches)
+			textMatches = append(textMatches, stageMatches...)
+			for _, match := range stageMatches {
 				if actionPriority(match.Action) > actionPriority(decision.Action) {
 					decision.Action = match.Action
 				}
 			}
 		}
-		sort.SliceStable(textMatches, func(i, j int) bool {
-			if textMatches[i].Start != textMatches[j].Start {
-				return textMatches[i].Start < textMatches[j].Start
-			}
-			if textMatches[i].End != textMatches[j].End {
-				return textMatches[i].End > textMatches[j].End
-			}
-			return textMatches[i].RuleID < textMatches[j].RuleID
-		})
 		decision.Matches = append(decision.Matches, textMatches...)
 	}
 	if err := ctx.Err(); err != nil {
@@ -132,7 +136,7 @@ func inspectKeywords(ctx context.Context, text Text, rule storage.Rule, values [
 					return nil, ErrMatchLimitExceeded
 				}
 				match := Match{
-					RuleID: rule.ID, Category: rule.Type, Path: text.Path,
+					RuleID: rule.ID, RuleName: rule.DisplayName(), Category: rule.Type, Path: text.Path,
 					Start: originalStart, End: originalEnd, Original: text.Value[originalStart:originalEnd],
 					Keyword: keyword, Target: targets[keyword], Action: rule.Action, Maskable: text.Maskable,
 				}
@@ -222,6 +226,9 @@ func inspectPrivateIPv4(ctx context.Context, text Text, rule storage.Rule, limit
 func effectiveMatch(match Match) Match {
 	if match.Action == ActionMask && !match.Maskable {
 		match.Action = ActionBlock
+		match.BlockReason = "unsafe_mask"
+	} else if match.Action == ActionBlock {
+		match.BlockReason = "rule_block"
 	}
 	return match
 }
@@ -239,7 +246,7 @@ func isIPv4Character(value byte) bool {
 
 func newMatch(text Text, rule storage.Rule, start, end int, keyword string) Match {
 	return Match{
-		RuleID: rule.ID, Category: rule.Type, Path: text.Path, Start: start, End: end,
+		RuleID: rule.ID, RuleName: rule.DisplayName(), Category: rule.Type, Path: text.Path, Start: start, End: end,
 		Original: text.Value[start:end], Keyword: keyword, Action: rule.Action, Maskable: text.Maskable,
 	}
 }
@@ -268,6 +275,15 @@ func (e *Engine) ApplyMask(payload Payload, decision Decision) error {
 }
 
 func applyNonOverlapping(value string, matches []Match) string {
+	selected := selectNonOverlapping(matches)
+	for index := len(selected) - 1; index >= 0; index-- {
+		match := selected[index]
+		value = value[:match.Start] + match.Target + value[match.End:]
+	}
+	return value
+}
+
+func sortMatches(matches []Match) {
 	sort.SliceStable(matches, func(i, j int) bool {
 		if matches[i].Start != matches[j].Start {
 			return matches[i].Start < matches[j].Start
@@ -277,6 +293,10 @@ func applyNonOverlapping(value string, matches []Match) string {
 		}
 		return matches[i].RuleID < matches[j].RuleID
 	})
+}
+
+func selectNonOverlapping(matches []Match) []Match {
+	sortMatches(matches)
 	selected := make([]Match, 0, len(matches))
 	lastEnd := -1
 	for _, match := range matches {
@@ -285,11 +305,7 @@ func applyNonOverlapping(value string, matches []Match) string {
 			lastEnd = match.End
 		}
 	}
-	for index := len(selected) - 1; index >= 0; index-- {
-		match := selected[index]
-		value = value[:match.Start] + match.Target + value[match.End:]
-	}
-	return value
+	return selected
 }
 
 func getString(root any, pointer string) (string, error) {

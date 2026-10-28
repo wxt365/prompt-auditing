@@ -5,15 +5,20 @@ package contract_test
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -39,15 +44,18 @@ func (a *contractAuditor) Write(event audit.Event) error {
 	return nil
 }
 
-func (a *contractAuditor) Fingerprint([]byte) string { return "contract-fingerprint" }
-func (a *contractAuditor) Healthy() bool             { return a.healthy }
-func (a *contractAuditor) MarkUnhealthy()            { a.healthy = false }
+func (a *contractAuditor) Healthy() bool  { return a.healthy }
+func (a *contractAuditor) MarkUnhealthy() { a.healthy = false }
 
 func TestCodex0144ResponsesContract(t *testing.T) {
 	if os.Getenv("RUN_CODEX_CONTRACT") != "1" {
 		t.Skip("设置 RUN_CODEX_CONTRACT=1 后运行真实 Codex 契约测试")
 	}
-	if _, err := exec.LookPath("codex"); err != nil {
+	binary := os.Getenv("CODEX_BINARY")
+	if binary == "" {
+		binary = "codex"
+	}
+	if _, err := exec.LookPath(binary); err != nil {
 		t.Skip("当前环境没有 codex CLI")
 	}
 
@@ -95,13 +103,15 @@ func TestCodex0144ResponsesContract(t *testing.T) {
 	defer localGateway.Close()
 
 	provider := fmt.Sprintf(`{name="Codex Security Gateway",base_url=%q,env_key="CODEX_GATEWAY_TOKEN",wire_api="responses",request_max_retries=0,stream_max_retries=0}`, localGateway.URL+"/v1")
-	command := exec.Command("codex", "exec", "--ephemeral", "--ignore-user-config", "--skip-git-repo-check", "--json",
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, binary, "exec", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check", "--json",
 		"-c", `model_provider="security_gateway"`,
 		"-c", `model="gpt-5.2-codex"`,
 		"-c", "model_providers.security_gateway="+provider,
 		"仅回复 OK")
+	command.Dir = t.TempDir()
 	command.Env = append(os.Environ(),
-		"CODEX_HOME="+t.TempDir(),
 		"CODEX_GATEWAY_TOKEN=contract-local-token-at-least-32-bytes",
 	)
 	output, commandErr := command.CombinedOutput()
@@ -132,6 +142,11 @@ func TestCodex0144ResponsesContract(t *testing.T) {
 		}
 	}
 	if _, err := security.Extract(captured); err != nil {
+		if capturePath := os.Getenv("GATEWAY_CONTRACT_CAPTURE"); capturePath != "" {
+			if writeErr := os.WriteFile(capturePath, captured, 0o600); writeErr != nil {
+				t.Fatal(writeErr)
+			}
+		}
 		t.Fatalf("Gateway 不支持当前 Codex 请求契约: %v", err)
 	}
 	if commandErr != nil {
@@ -207,4 +222,125 @@ func successfulSSE() string {
 		fmt.Fprintf(&builder, "event: %s\ndata: %s\n\n", event["type"], body)
 	}
 	return builder.String()
+}
+
+func TestCurrentCodexImageAndToolHistoryContract(t *testing.T) {
+	if os.Getenv("RUN_CODEX_CONTRACT") != "1" {
+		t.Skip("设置 RUN_CODEX_CONTRACT=1 后运行真实 Codex 契约测试")
+	}
+	binary := os.Getenv("CODEX_BINARY")
+	if binary == "" {
+		binary = "codex"
+	}
+	directory := t.TempDir()
+	// 使用完全由测试生成的图片、补丁和命令；模型服务始终是本机假服务。
+	imagePath := filepath.Join(directory, "sample.png")
+	var imageBuffer bytes.Buffer
+	if err := png.Encode(&imageBuffer, image.NewRGBA(image.Rect(0, 0, 1, 1))); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(imagePath, imageBuffer.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var captured [][]byte
+	var mu sync.Mutex
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		decoded := decodeForCapture(t, body, r.Header.Get("Content-Encoding"))
+		mu.Lock()
+		captured = append(captured, decoded)
+		step := len(captured)
+		mu.Unlock()
+		var root map[string]any
+		if err := json.Unmarshal(decoded, &root); err != nil {
+			t.Error(err)
+			return
+		}
+		for index, entry := range root["input"].([]any) {
+			item := entry.(map[string]any)
+			t.Logf("步骤 %d input/%d type=%v 字段=%s", step, index, item["type"], strings.Join(sortedKeys(item), ","))
+		}
+		if _, err := security.Extract(decoded); err != nil {
+			t.Logf("步骤 %d 校验失败: %v", step, err)
+			if prefix := os.Getenv("GATEWAY_CONTRACT_CAPTURE"); prefix != "" {
+				_ = os.WriteFile(fmt.Sprintf("%s.step%d.json", prefix, step), decoded, 0o600)
+			}
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		var item map[string]any
+		switch step {
+		case 1:
+			item = map[string]any{"type": "custom_tool_call", "id": "ctc_probe", "call_id": "call_patch_probe", "name": "apply_patch", "input": "*** Begin Patch\n*** End Patch"}
+		case 2:
+			item = map[string]any{"type": "function_call", "id": "fc_probe", "call_id": "call_shell_probe", "name": "shell_command", "arguments": `{"command":"Write-Output probe"}`}
+		default:
+			_, _ = io.WriteString(w, successfulSSE())
+			return
+		}
+		for _, event := range []map[string]any{
+			{"type": "response.output_item.added", "output_index": 0, "item": item, "sequence_number": 1},
+			{"type": "response.output_item.done", "output_index": 0, "item": item, "sequence_number": 2},
+			{"type": "response.completed", "response": map[string]any{"id": fmt.Sprintf("resp_probe_%d", step), "status": "completed", "output": []any{item}}, "sequence_number": 3},
+		} {
+			raw, _ := json.Marshal(event)
+			_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event["type"], raw)
+		}
+	}))
+	defer local.Close()
+	engine, err := security.NewEngine(storage.RuleSet{Version: "1", DefaultAction: storage.DefaultAction})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := url.Parse(local.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := gateway.NewHandler(gateway.Options{Upstream: target, Client: local.Client(), Engine: engine,
+		Audit: &contractAuditor{healthy: true}, ClientAuth: true,
+		Limits: config.LimitsConfig{MaxCompressedBytes: 5 << 20, MaxDecompressedBytes: 5 << 20, MaxConcurrent: 10}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if prefix := os.Getenv("GATEWAY_CONTRACT_CAPTURE"); prefix != "" {
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			_ = os.WriteFile(prefix+".request.json", decodeForCapture(t, body, r.Header.Get("Content-Encoding")), 0o600)
+			r.Body = io.NopCloser(bytes.NewReader(body))
+		}
+		handler.ServeHTTP(w, r)
+	}))
+	defer proxy.Close()
+	provider := fmt.Sprintf(`{name="Local Contract",base_url=%q,env_key="CODEX_GATEWAY_TOKEN",wire_api="responses",request_max_retries=0,stream_max_retries=0}`, proxy.URL+"/v1")
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	model := os.Getenv("CODEX_CONTRACT_MODEL")
+	if model == "" {
+		model = "gpt-5.2-codex"
+	}
+	command := exec.CommandContext(ctx, binary, "exec", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check", "--json", "--image", imagePath,
+		"-c", `model_provider="security_gateway"`, "-c", "model="+strconv.Quote(model), "-c", "model_providers.security_gateway="+provider, "仅回复 OK")
+	command.Dir = directory
+	command.Env = append(os.Environ(), "CODEX_GATEWAY_TOKEN=contract-test-key")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Codex 图片与工具往返失败: %v\n%s", err, output)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(captured) < 3 {
+		t.Fatalf("缺少工具往返请求: %d\n%s", len(captured), output)
+	}
+	for index, body := range captured {
+		if _, err := security.Extract(body); err != nil {
+			t.Errorf("步骤 %d 当前 Codex 请求不兼容: %v", index+1, err)
+		}
+	}
 }

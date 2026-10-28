@@ -1,0 +1,122 @@
+[
+  {
+    "id": "mapping.sensitive-replace",
+    "name": "敏感字替换",
+    "type": "keyword_mapping",
+    "action": "mask",
+    "enabled": true,
+    "case_sensitive": false,
+    "mappings": [
+      {
+        "source": "装备",
+        "target": "ZB"
+      },
+      {
+        "source": "兵棋",
+        "target": "BQ"
+      },
+      {
+        "source": "战略战役",
+        "target": "ZLZY"
+      },
+      {
+        "source": "我情",
+        "target": "我Q"
+      },
+      {
+        "source": "导弹",
+        "target": "DD"
+      },
+      {
+        "source": "作战",
+        "target": "ZZ"
+      },
+      {
+        "source": "火箭军",
+        "target": "火JJ"
+      },
+      {
+        "source": "陆军",
+        "target": "陆J"
+      },
+      {
+        "source": "海军",
+        "target": "海J"
+      },
+      {
+        "source": "空军",
+        "target": "空J"
+      },
+      {
+        "source": "部队",
+        "target": "BD"
+      },
+      {
+        "source": "武器",
+        "target": "WQ"
+      },
+      {
+        "source": "多弹",
+        "target": "多D"
+      },
+      {
+        "source": "军事",
+        "target": "J事"
+      },
+      {
+        "source": "战术",
+        "target": "ZS"
+      },
+      {
+        "source": "敌方",
+        "target": "D方"
+      }
+    ]
+  },
+  {
+    "id": "keyword.sensitive-block",
+    "name": "敏感字拦截",
+    "type": "keyword",
+    "action": "block",
+    "enabled": true,
+    "case_sensitive": false,
+    "keywords": [
+      "绝密",
+      "机密",
+      "涉密",
+      "保密",
+      "武器",
+      "兵器",
+      "装备",
+      "弹药",
+      "炮弹",
+      "军事",
+      "军品",
+      "密品",
+      "密件",
+      "导弹",
+      "作战",
+      "交战",
+      "战斗",
+      "战争",
+      "单兵",
+      "兵种",
+      "部队",
+      "蓝军",
+      "军方",
+      "敌方",
+      "战略战役",
+      "战术",
+      "多弹",
+      "洞库",
+      "靶场",
+      "破解",
+      "反编译",
+      "暴力",
+      "恐怖",
+      "色情",
+      "自杀",
+      "毒品"
+    ]
+  }
+]

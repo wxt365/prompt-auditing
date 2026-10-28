@@ -30,7 +30,7 @@ func TestInitAndCheckConfig(t *testing.T) {
 		t.Fatalf("init 输出错误: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 	stdout, stderr, code = runForTest([]string{"check-config", "--config", configPath})
-	if code != 0 || !strings.Contains(stdout, "规则版本=1") || !strings.Contains(stdout, "规则数量=3") || stderr != "" {
+	if code != 0 || !strings.Contains(stdout, "规则版本=1") || !strings.Contains(stdout, "规则数量=5") || stderr != "" {
 		t.Fatalf("check-config 输出错误: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 	_, _, code = runForTest([]string{"init", "--config", configPath})
@@ -90,7 +90,7 @@ func TestPolicyCRUDIsPersistedAndVersioned(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &set); err != nil {
 		t.Fatal(err)
 	}
-	if set.Version != "7" || len(set.Rules) != 7 {
+	if set.Version != "7" || len(set.Rules) != 9 {
 		t.Fatalf("规则快照错误: %#v", set)
 	}
 	for _, rule := range set.Rules {
@@ -158,6 +158,34 @@ func TestStartDoesNotReportStartedWhenListenFails(t *testing.T) {
 	stdout, stderr, code := runForTest([]string{"start", "--config", configPath})
 	if code != 1 || strings.Contains(stdout, "Gateway 已启动") || !strings.Contains(stderr, "监听 Gateway 地址") {
 		t.Fatalf("监听失败输出错误: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+}
+
+func TestStartWarnsWhenUpstreamUsesHTTP(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	directory := t.TempDir()
+	configPath := writeTestConfigWithListen(t, directory, listener.Addr().String())
+	body, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = bytes.Replace(body, []byte("https://api.openai.com/v1"), []byte("http://192.168.137.250:33000/v1/"), 1)
+	if err := os.WriteFile(configPath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, stderr, code := runForTest([]string{"init", "--config", configPath}); code != 0 {
+		t.Fatal(stderr)
+	}
+	t.Setenv("CODEX_GATEWAY_TOKEN", "local-token-with-at-least-32-bytes")
+	t.Setenv("OPENAI_API_KEY", "different-upstream-key")
+	stdout, stderr, code := runForTest([]string{"start", "--config", configPath})
+	if code != 1 || strings.Contains(stdout, "Gateway 已启动") ||
+		!strings.Contains(stderr, "upstream 使用 HTTP") || !strings.Contains(stderr, "明文传输") {
+		t.Fatalf("HTTP upstream 警告错误: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 }
 

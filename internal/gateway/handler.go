@@ -27,6 +27,7 @@ import (
 )
 
 const responsesPath = "/v1/responses"
+const chatCompletionsPath = "/v1/chat/completions"
 
 const redactedCredential = "[REDACTED_GATEWAY_CREDENTIAL]"
 
@@ -40,7 +41,6 @@ var (
 
 type Auditor interface {
 	Write(audit.Event) error
-	Fingerprint([]byte) string
 	Healthy() bool
 	MarkUnhealthy()
 }
@@ -52,41 +52,49 @@ type SecurityEngine interface {
 }
 
 type Options struct {
-	Upstream    *url.URL
-	Client      *http.Client
-	Engine      SecurityEngine
-	Audit       Auditor
-	LocalToken  string
-	UpstreamKey string
-	Limits      config.LimitsConfig
-	OSUser      string
-	Now         func() time.Time
+	Upstream     *url.URL
+	Client       *http.Client
+	Engine       SecurityEngine
+	Audit        Auditor
+	LocalToken   string
+	UpstreamKey  string
+	ClientAuth   bool
+	PayloadError func(string)
+	RequestLog   *RequestLog
+	Limits       config.LimitsConfig
+	OSUser       string
+	Now          func() time.Time
 }
 
 type Handler struct {
-	upstream    *url.URL
-	client      *http.Client
-	engine      SecurityEngine
-	audit       Auditor
-	localToken  string
-	upstreamKey string
-	limits      config.LimitsConfig
-	semaphore   chan struct{}
-	osUser      string
-	now         func() time.Time
+	upstream     *url.URL
+	client       *http.Client
+	engine       SecurityEngine
+	audit        Auditor
+	localToken   string
+	upstreamKey  string
+	clientAuth   bool
+	payloadError func(string)
+	requestLog   *RequestLog
+	trace        *requestTrace
+	limits       config.LimitsConfig
+	semaphore    chan struct{}
+	osUser       string
+	now          func() time.Time
 }
 
 func NewHandler(options Options) (*Handler, error) {
-	if options.Upstream == nil || options.Upstream.Host == "" {
+	if options.Upstream == nil || options.Upstream.Host == "" ||
+		(options.Upstream.Scheme != "http" && options.Upstream.Scheme != "https") {
 		return nil, errors.New("上游地址无效")
 	}
 	if options.Client == nil || options.Engine == nil || options.Audit == nil {
 		return nil, errors.New("Gateway 依赖不能为空")
 	}
-	if options.LocalToken == "" || options.UpstreamKey == "" {
+	if !options.ClientAuth && (options.LocalToken == "" || options.UpstreamKey == "") {
 		return nil, errors.New("本地令牌和上游 API Key 不能为空")
 	}
-	if options.LocalToken == options.UpstreamKey {
+	if !options.ClientAuth && options.LocalToken == options.UpstreamKey {
 		return nil, errors.New("本地令牌和上游 API Key 必须使用不同值")
 	}
 	if options.Limits.MaxCompressedBytes <= 0 || options.Limits.MaxDecompressedBytes <= 0 || options.Limits.MaxConcurrent <= 0 {
@@ -111,37 +119,57 @@ func NewHandler(options Options) (*Handler, error) {
 	}
 	return &Handler{
 		upstream: options.Upstream, client: &client, engine: options.Engine, audit: options.Audit,
-		localToken: options.LocalToken, upstreamKey: options.UpstreamKey, limits: options.Limits,
-		semaphore: make(chan struct{}, options.Limits.MaxConcurrent), osUser: options.OSUser, now: options.Now,
+		localToken: options.LocalToken, upstreamKey: options.UpstreamKey, clientAuth: options.ClientAuth, payloadError: options.PayloadError, limits: options.Limits,
+		requestLog: options.RequestLog,
+		semaphore:  make(chan struct{}, options.Limits.MaxConcurrent), osUser: options.OSUser, now: options.Now,
 	}, nil
 }
 
 func (h *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	requestID := newRequestID()
 	writer.Header().Set("x-gateway-request-id", requestID)
+	started := h.now()
+	if trace := h.requestLog.begin(requestID, request.Method, request.URL.Path); trace != nil {
+		current := *h
+		current.trace = trace
+		h = &current
+	}
+	returned := false
+	defer func() { h.trace.finish(returned, request.Context().Err() != nil) }()
+	h.serveRequest(writer, request, requestID, started)
+	returned = true
+}
+
+func (h *Handler) serveRequest(writer http.ResponseWriter, request *http.Request, requestID string, started time.Time) {
 	if request.URL.Path == "/healthz" && request.Method == http.MethodGet {
 		h.handleHealth(writer)
 		return
 	}
-	started := h.now()
 	if !h.authorized(request) {
 		h.recordSystemFailure(requestID, "gateway_unauthorized", started)
-		writeError(writer, http.StatusUnauthorized, "gateway_unauthorized", "本地访问令牌无效")
+		h.reject(writer, http.StatusUnauthorized, "gateway_unauthorized", "请求认证信息缺失或无效")
 		return
 	}
-	if request.URL.Path != responsesPath || request.URL.RawQuery != "" {
+	if h.clientAuth {
+		// 凭证仅保留在当前请求副本中，供转发及审计脱敏使用，避免并发请求串用密钥。
+		current := *h
+		current.localToken = clientBearer(request)
+		current.upstreamKey = current.localToken
+		h = &current
+	}
+	if (request.URL.Path != responsesPath && request.URL.Path != chatCompletionsPath) || request.URL.RawQuery != "" {
 		h.recordSystemFailure(requestID, "gateway_route_not_supported", started)
-		writeError(writer, http.StatusNotFound, "gateway_route_not_supported", "请求路径不受支持")
+		h.reject(writer, http.StatusNotFound, "gateway_route_not_supported", "请求路径不受支持")
 		return
 	}
 	if request.Method != http.MethodPost {
 		h.recordSystemFailure(requestID, "gateway_route_not_supported", started)
-		writeError(writer, http.StatusMethodNotAllowed, "gateway_route_not_supported", "请求方法不受支持")
+		h.reject(writer, http.StatusMethodNotAllowed, "gateway_route_not_supported", "请求方法不受支持")
 		return
 	}
 	if isUpgradeRequest(request) {
 		h.recordSystemFailure(requestID, "gateway_route_not_supported", started)
-		writeError(writer, http.StatusBadRequest, "gateway_route_not_supported", "协议升级不受支持")
+		h.reject(writer, http.StatusBadRequest, "gateway_route_not_supported", "协议升级不受支持")
 		return
 	}
 	select {
@@ -149,41 +177,66 @@ func (h *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		defer func() { <-h.semaphore }()
 	default:
 		h.recordSystemFailure(requestID, "gateway_busy", started)
-		writeError(writer, http.StatusTooManyRequests, "gateway_busy", "Gateway 并发请求已达上限")
+		h.reject(writer, http.StatusTooManyRequests, "gateway_busy", "Gateway 并发请求已达上限")
 		return
 	}
 
+	h.trace.phase("reading")
 	original, decoded, encoding, err := h.readRequestBody(request)
 	if err != nil {
 		code, message, status := bodyError(err)
 		h.recordSystemFailure(requestID, code, started)
-		writeError(writer, status, code, message)
+		h.reject(writer, status, code, message)
 		return
 	}
 	contentTypes := request.Header.Values("Content-Type")
 	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
 	if len(contentTypes) != 1 || err != nil || mediaType != "application/json" {
 		h.recordSystemFailure(requestID, "unsupported_media_type", started)
-		writeError(writer, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type 不受支持")
+		h.reject(writer, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type 不受支持")
 		return
 	}
-	payload, err := security.Extract(decoded)
+	var payload security.Payload
+	if request.URL.Path == chatCompletionsPath {
+		payload, err = security.ExtractChatCompletions(decoded)
+	} else {
+		payload, err = security.Extract(decoded)
+	}
 	if err != nil {
 		h.recordSystemFailure(requestID, "unsupported_payload", started)
-		writeError(writer, http.StatusUnprocessableEntity, "unsupported_payload", "请求载荷包含未支持的结构")
+		detail := redactCredentialString(err.Error(), []string{h.localToken, h.upstreamKey})
+		if len(detail) > 512 {
+			detail = string([]rune(detail)[:min(128, len([]rune(detail)))]) + "…"
+		}
+		if h.payloadError != nil {
+			h.payloadError(detail)
+		}
+		h.reject(writer, http.StatusUnprocessableEntity, "unsupported_payload", "请求载荷包含未支持的结构: "+detail)
 		return
 	}
 
+	h.trace.phase("inspecting")
 	inspectionContext, cancelInspection := context.WithTimeout(request.Context(), securityInspectionTimeout)
 	decision, err := inspectSafely(inspectionContext, h.engine, payload)
 	cancelInspection()
 	if err != nil {
 		h.recordSystemFailure(requestID, "security_engine_unavailable", started)
-		writeError(writer, http.StatusServiceUnavailable, "security_engine_unavailable", "安全检测服务不可用")
+		h.reject(writer, http.StatusServiceUnavailable, "security_engine_unavailable", "安全检测服务不可用")
 		return
 	}
+	h.trace.update(func(e *RequestLogEntry) {
+		e.Action = decision.Action
+		ids := uniqueMatches(decision.Matches, func(match security.Match) string { return match.RuleID })
+		for _, id := range ids[:min(20, len(ids))] {
+			e.RuleIDs = append(e.RuleIDs, limitLogText(redactCredentialString(id, []string{h.localToken, h.upstreamKey})))
+		}
+		names := uniqueMatches(decision.Matches, func(match security.Match) string { return match.RuleName })
+		for _, name := range names[:min(20, len(names))] {
+			e.RuleNames = append(e.RuleNames, limitLogText(redactCredentialString(name, []string{h.localToken, h.upstreamKey})))
+		}
+	})
 	if !h.audit.Healthy() {
-		writeError(writer, http.StatusServiceUnavailable, "audit_unavailable", "审计服务不可用")
+		h.reject(writer, http.StatusServiceUnavailable, "audit_unavailable", "审计服务不可用")
 		return
 	}
 	decisionEvent := h.decisionEvent(requestID, decision, started)
@@ -192,15 +245,15 @@ func (h *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		decisionEvent.RequestBody, err = auditRequestBody(payload.Root, h.localToken, h.upstreamKey)
 		if err != nil {
 			h.recordSystemFailure(requestID, "security_engine_unavailable", started)
-			writeError(writer, http.StatusServiceUnavailable, "security_engine_unavailable", "安全检测服务不可用")
+			h.reject(writer, http.StatusServiceUnavailable, "security_engine_unavailable", "安全检测服务不可用")
 			return
 		}
 		if err := h.audit.Write(decisionEvent); err != nil {
 			h.audit.MarkUnhealthy()
-			writeError(writer, http.StatusServiceUnavailable, "audit_unavailable", "审计服务不可用")
+			h.reject(writer, http.StatusServiceUnavailable, "audit_unavailable", "审计服务不可用")
 			return
 		}
-		writeError(writer, http.StatusForbidden, "prompt_blocked", "内容审计命中风险规则，请调整输入后重试")
+		h.reject(writer, http.StatusForbidden, "prompt_blocked", "内容审计命中风险规则，请调整输入后重试")
 		return
 	}
 
@@ -209,28 +262,27 @@ func (h *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if decision.Action == security.ActionMask {
 		if err := applyMaskSafely(h.engine, payload, decision); err != nil {
 			h.recordSystemFailure(requestID, "security_engine_unavailable", started)
-			writeError(writer, http.StatusServiceUnavailable, "security_engine_unavailable", "安全检测服务不可用")
+			h.reject(writer, http.StatusServiceUnavailable, "security_engine_unavailable", "安全检测服务不可用")
 			return
 		}
 		masked, err := security.Marshal(payload)
 		if err != nil {
 			h.recordSystemFailure(requestID, "security_engine_unavailable", started)
-			writeError(writer, http.StatusServiceUnavailable, "security_engine_unavailable", "安全检测服务不可用")
+			h.reject(writer, http.StatusServiceUnavailable, "security_engine_unavailable", "安全检测服务不可用")
 			return
 		}
 		forwardBody, err = encodeBody(masked, encoding)
 		if err != nil {
 			h.recordSystemFailure(requestID, "security_engine_unavailable", started)
-			writeError(writer, http.StatusServiceUnavailable, "security_engine_unavailable", "安全检测服务不可用")
+			h.reject(writer, http.StatusServiceUnavailable, "security_engine_unavailable", "安全检测服务不可用")
 			return
 		}
 		bodyModified = !bytes.Equal(forwardBody, original)
 	}
 	decisionEvent.Result = "forwarding"
-	decisionEvent.RequestHMAC = h.audit.Fingerprint(decoded)
 	if err := h.audit.Write(decisionEvent); err != nil {
 		h.audit.MarkUnhealthy()
-		writeError(writer, http.StatusServiceUnavailable, "audit_unavailable", "审计服务不可用")
+		h.reject(writer, http.StatusServiceUnavailable, "audit_unavailable", "审计服务不可用")
 		return
 	}
 	h.forward(writer, request, requestID, started, decision, forwardBody, bodyModified)
@@ -276,6 +328,7 @@ func (h *Handler) handleHealth(writer http.ResponseWriter) {
 		state = "unavailable"
 	}
 	writer.Header().Set("Content-Type", "application/json")
+	h.trace.status(status)
 	writer.WriteHeader(status)
 	_ = json.NewEncoder(writer).Encode(map[string]any{
 		"status": state, "rule_set_version": h.engine.RuleSetVersion(), "policy": true, "audit": h.audit.Healthy(),
@@ -283,11 +336,26 @@ func (h *Handler) handleHealth(writer http.ResponseWriter) {
 }
 
 func (h *Handler) authorized(request *http.Request) bool {
+	if h.clientAuth {
+		// 透传模式由固定上游验证凭证，本地仅检查认证头格式。
+		return clientBearer(request) != ""
+	}
 	provided := strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer ")
 	if provided == request.Header.Get("Authorization") || len(provided) != len(h.localToken) {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(provided), []byte(h.localToken)) == 1
+}
+
+func clientBearer(request *http.Request) string {
+	if len(request.Header.Values("Authorization")) != 1 {
+		return ""
+	}
+	parts := strings.Fields(request.Header.Get("Authorization"))
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		return ""
+	}
+	return parts[1]
 }
 
 func (h *Handler) readRequestBody(request *http.Request) ([]byte, []byte, string, error) {
@@ -415,6 +483,7 @@ func (h *Handler) decisionEvent(requestID string, decision security.Decision, st
 	}
 	for index := range event.Matches {
 		event.Matches[index].MatchedKeyword = redactCredentialString(event.Matches[index].MatchedKeyword, secrets)
+		event.Matches[index].RuleName = redactCredentialString(event.Matches[index].RuleName, secrets)
 	}
 	return event
 }
@@ -427,12 +496,12 @@ func auditMatches(matches []security.Match) []audit.Match {
 		if match.Category == "keyword" || match.Category == "keyword_mapping" {
 			keyword = match.Original
 		}
-		key := match.RuleID + "\x00" + match.Category + "\x00" + keyword
+		key := match.RuleID + "\x00" + match.Category + "\x00" + keyword + "\x00" + match.Action + "\x00" + match.BlockReason
 		if _, exists := seen[key]; exists {
 			continue
 		}
 		seen[key] = struct{}{}
-		result = append(result, audit.Match{RuleID: match.RuleID, Category: match.Category, MatchedKeyword: keyword})
+		result = append(result, audit.Match{RuleID: match.RuleID, RuleName: match.RuleName, Category: match.Category, MatchedKeyword: keyword, Action: match.Action, Reason: match.BlockReason})
 	}
 	return result
 }
@@ -471,6 +540,7 @@ func (h *Handler) recordSystemFailure(requestID, errorCode string, started time.
 	})
 	if err != nil {
 		h.audit.MarkUnhealthy()
+		h.trace.update(func(e *RequestLogEntry) { e.AuditError = true })
 	}
 }
 

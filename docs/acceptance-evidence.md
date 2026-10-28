@@ -2,10 +2,12 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 权威设计 | `docs/codex-security-gateway-mvp-design.md` 0.6 |
-| 核验日期 | 2026-08-03 |
+| 权威设计 | `docs/codex-security-gateway-mvp-design.md` 0.7 |
+| 核验日期 | 2026-08-04 |
 | 本机环境 | Apple Silicon macOS，Go 1.26.5 |
 | 状态定义 | `通过` 表示当前仓库自动化证据已覆盖；`部分通过` 表示实现或较低层测试存在，但缺少验收标准要求的完整层级；`待环境` 表示缺少目标平台、授权或外部资源；`待确认` 表示产品或安全参数尚未冻结。 |
+
+> 2026-10-28 更新：下表为历史 MVP 验收记录，其中“未知字段/未知工具类型一律拒绝”的 AC-007 策略已被统一 JSON 扩展审计取代。当前回归、测试边界和试用包见 [JSON 扩展兼容](json-extensions-20261028.md)；不沿用旧结论作为新策略的验证证据。
 
 ## AC 证据
 
@@ -21,8 +23,8 @@
 | AC-008 | 通过 | `TestMaskReplacesAuthorizationAndPreservesGzip` 验证 gzip 解压检测、脱敏后重编码和假上游解析。 | 无。 |
 | AC-009 | 通过 | 转发前审计失败和事务明细失败均验证失败关闭；`TestSecurityEnginePanicFailsClosed`、`TestHandlerAddsSecurityInspectionDeadline`、`TestInspectionCancellationAndMatchLimitFailClosed` 和 `TestSecurityInspectionLimitFailsClosedWithoutCallingUpstream` 验证引擎异常、2 秒扫描 Deadline、取消及 10,000 条命中上限均返回稳定 `503` 且上游零调用；关键词、正则和 IPv4 检测均逐次生成命中，Go 正则使用 RE2。 | 无。 |
 | AC-010 | 部分通过 | 配置校验强制 `listen` 为回环 IP，实际发布产物只监听 `127.0.0.1:38181`。Docker 独立网络命名空间使用 `host.docker.internal` 仍可取得 `/healthz` 200；正向控制端口同样可达，Python 对照服务确认 Docker Desktop 代理后的宿主源地址为 `127.0.0.1`。 | 缺少物理另一主机连接失败证据；且若验收范围包含本地 Docker Desktop 容器，“TCP 连接失败”当前不成立，需产品修订 AC-010 或增加宿主防火墙/容器网络策略。 |
-| AC-011 | 通过 | `TestMaskReplacesAuthorizationAndPreservesGzip` 验证 Host 固定、上游凭证替换、连接专用 Header、`Forwarded` 和 `X-Forwarded-*` 删除；`TestUpstreamRedirectIsReturnedWithoutFollowing` 验证不跟随上游重定向并删除 `Location`；目标 URL 只由启动配置生成。 | 无。 |
-| AC-012 | 通过 | `TestUpstreamStatusAndBodyAreForwardedWithoutRetry` 覆盖 400/401/429/500；`TestUpstreamErrorRedactsConfiguredCredentials` 覆盖 gzip、JSON Unicode 转义、正文/Header 凭证脱敏和长度重建；上游 Transport 保留有界 TCP、TLS 握手、响应 Header 和空闲连接超时；`TestSSEMidStreamFailureIsAudited` 覆盖断流诊断。 | 无。 |
+| AC-011 | 通过 | `TestMaskReplacesAuthorizationAndPreservesGzip` 验证 Host 固定、上游凭证替换、连接专用 Header、`Forwarded` 和 `X-Forwarded-*` 删除；`TestUpstreamRedirectIsReturnedWithoutFollowing` 验证不跟随上游重定向并删除 `Location`；`TestLoadAcceptsFixedHTTPAndHTTPSUpstreams`、`TestLoadRejectsUnsupportedOrNonFixedUpstreams` 和 `TestHTTPUpstreamWithTrailingSlashUsesResponsesPath` 验证固定 HTTP/HTTPS 双协议、其他 scheme 拒绝及 `/v1/` 路径归一化；目标 URL 仍只由启动配置生成。 | 无。 |
+| AC-012 | 通过 | `TestUpstreamStatusAndBodyAreForwardedWithoutRetry` 覆盖 400/401/429/500；`TestUpstreamErrorRedactsConfiguredCredentials` 覆盖 gzip、JSON Unicode 转义、正文/Header 凭证脱敏和长度重建；上游 Transport 保留有界 TCP、HTTPS TLS 握手、响应 Header 和空闲连接超时；`TestStartWarnsWhenUpstreamUsesHTTP` 验证 HTTP 模式输出明文传输警告；`TestSSEMidStreamFailureIsAudited` 覆盖断流诊断。 | 无。 |
 | AC-013 | 通过 | 配置未知字段、数据库同路径及硬链接同文件、高 Schema 版本、权限过宽、已存在共享目录不被修改、NFKC 映射冲突和重复初始化均有测试；`TestOpenRejectsEmptyDatabasesWithoutInitializingThem` 验证打开路径拒绝空策略库和审计库且不写入 Schema 或默认规则，`TestStartAndCheckConfigRejectEmptiedDatabases` 进一步覆盖两个 CLI 命令与两种空库组合；`TestInvalidRuleSetsAreRejected` 逐项覆盖重复规则 ID、非法正则、空映射和同一源对应多个目标。 | 无。 |
 | AC-014 | 通过 | `TestGatewayUsesPolicyAndAuditDatabasesEndToEnd`、`TestAuditEventAndMatchesCommitAtomically` 和 `TestBlockAuditRedactsConfiguredCredentials` 验证 UTC 事件、全部去重关键字、结构化完整阻断请求体，以及本地 Token、上游 API Key 不进入 SQLite、WAL、SHM 或命中明细；数据库 Schema 不包含 Header 或凭证字段。 | 无。 |
 | AC-015 | 待确认 | 2026-08-03 最终性能复测通过生产 `Inspect(context.Context, Payload)` 路径，本机得到：1 MiB 纯检测 P95 `61.656292 ms`；SSE 首字节额外代理延迟 P95 `336.75 us`；第 11 个并发请求返回 `429`。 | 第 18 节的 5 MiB、100 ms、150 ms、并发 10 仍需产品负责人冻结，且需记录正式基准机规格。 |

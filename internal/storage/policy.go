@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
@@ -44,7 +46,7 @@ func (store *PolicyStore) Load(ctx context.Context) (RuleSet, error) {
 	if err := tx.QueryRowContext(ctx, "SELECT value FROM policy_meta WHERE key = 'rule_set_version'").Scan(&version); err != nil {
 		return RuleSet{}, fmt.Errorf("读取规则集版本: %w", err)
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT id, type, action, enabled, case_sensitive,
+	rows, err := tx.QueryContext(ctx, `SELECT id, name, type, action, enabled, case_sensitive,
 		COALESCE(pattern, ''), COALESCE(replacement, '') FROM policy_rules ORDER BY id`)
 	if err != nil {
 		return RuleSet{}, err
@@ -54,7 +56,7 @@ func (store *PolicyStore) Load(ctx context.Context) (RuleSet, error) {
 	set := RuleSet{Version: version, DefaultAction: DefaultAction}
 	for rows.Next() {
 		var rule Rule
-		if err := rows.Scan(&rule.ID, &rule.Type, &rule.Action, &rule.Enabled, &rule.CaseSensitive, &rule.Pattern, &rule.Replacement); err != nil {
+		if err := rows.Scan(&rule.ID, &rule.Name, &rule.Type, &rule.Action, &rule.Enabled, &rule.CaseSensitive, &rule.Pattern, &rule.Replacement); err != nil {
 			return RuleSet{}, err
 		}
 		set.Rules = append(set.Rules, rule)
@@ -166,11 +168,45 @@ func (store *PolicyStore) insertRule(ctx context.Context, rule Rule) error {
 		return err
 	}
 	defer tx.Rollback()
+	if err := insertRuleTx(ctx, tx, rule); err != nil {
+		return err
+	}
+	if err := incrementRuleSetVersion(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ReplaceRules 将界面编辑的完整规则集与版本递增在同一个事务中提交。
+func (store *PolicyStore) ReplaceRules(ctx context.Context, rules []Rule) error {
+	if err := ValidateRuleSet(RuleSet{Version: "1", DefaultAction: DefaultAction, Rules: rules}); err != nil {
+		return err
+	}
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, "DELETE FROM policy_rules"); err != nil {
+		return err
+	}
+	for _, rule := range rules {
+		if err := insertRuleTx(ctx, tx, rule); err != nil {
+			return err
+		}
+	}
+	if err := incrementRuleSetVersion(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func insertRuleTx(ctx context.Context, tx *sql.Tx, rule Rule) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := tx.ExecContext(ctx, `INSERT INTO policy_rules
-		(id, type, action, enabled, case_sensitive, pattern, replacement, created_at, updated_at)
-		VALUES(?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?)`,
-		rule.ID, rule.Type, rule.Action, rule.Enabled, rule.CaseSensitive, rule.Pattern, rule.Replacement, now, now); err != nil {
+		(id, name, type, action, enabled, case_sensitive, pattern, replacement, created_at, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?)`,
+		rule.ID, rule.Name, rule.Type, rule.Action, rule.Enabled, rule.CaseSensitive, rule.Pattern, rule.Replacement, now, now); err != nil {
 		return fmt.Errorf("写入规则 %s: %w", rule.ID, err)
 	}
 	for index, keyword := range uniqueStrings(rule.Keywords) {
@@ -185,10 +221,7 @@ func (store *PolicyStore) insertRule(ctx context.Context, rule Rule) error {
 			return fmt.Errorf("写入替换映射: %w", err)
 		}
 	}
-	if err := incrementRuleSetVersion(ctx, tx); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return nil
 }
 
 func (store *PolicyStore) SetEnabled(ctx context.Context, id string, enabled bool) error {
@@ -247,6 +280,9 @@ func requireOneAffected(result sql.Result, id string) error {
 }
 
 func validateRule(rule Rule) error {
+	if !utf8.ValidString(rule.Name) || utf8.RuneCountInString(rule.Name) > 128 || strings.IndexFunc(rule.Name, unicode.IsControl) >= 0 || (rule.Name != "" && strings.TrimSpace(rule.Name) == "") {
+		return errors.New("规则名称须为 1 至 128 个字符，不能包含控制字符")
+	}
 	if strings.TrimSpace(rule.ID) == "" {
 		return errors.New("规则 ID 不能为空")
 	}
@@ -260,6 +296,11 @@ func validateRule(rule Rule) error {
 	case "keyword":
 		if len(rule.Keywords) == 0 || rule.Action == "mask" {
 			return fmt.Errorf("关键字规则 %s 配置无效", rule.ID)
+		}
+		for _, keyword := range rule.Keywords {
+			if strings.TrimSpace(keyword) == "" {
+				return fmt.Errorf("关键字规则 %s 包含空关键字", rule.ID)
+			}
 		}
 		if duplicate := duplicateNormalized(rule.Keywords, rule.CaseSensitive); duplicate != "" {
 			return fmt.Errorf("关键字规则 %s 包含重复关键字 %q", rule.ID, duplicate)

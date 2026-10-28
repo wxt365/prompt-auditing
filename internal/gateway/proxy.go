@@ -3,13 +3,17 @@ package gateway
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"io"
 	"mime"
 	"net/http"
+	"net/http/httptrace"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/xiaotaowang/prompt-auditing/internal/audit"
@@ -26,16 +30,17 @@ func (h *Handler) forward(writer http.ResponseWriter, incoming *http.Request, re
 	target := *h.upstream
 	basePath := strings.TrimRight(target.Path, "/")
 	if strings.HasSuffix(basePath, "/v1") {
-		target.Path = basePath + "/responses"
+		target.Path = basePath + strings.TrimPrefix(incoming.URL.Path, "/v1")
 	} else {
-		target.Path = basePath + responsesPath
+		target.Path = basePath + incoming.URL.Path
 	}
+	target.RawPath = ""
 	target.RawQuery = ""
 	target.Fragment = ""
 	request, err := http.NewRequestWithContext(incoming.Context(), http.MethodPost, target.String(), bytes.NewReader(body))
 	if err != nil {
 		h.complete(requestID, started, decision, nil, "upstream_error", "upstream_error")
-		writeError(writer, http.StatusBadGateway, "upstream_error", "无法创建上游请求")
+		h.reject(writer, http.StatusBadGateway, "upstream_error", "无法创建上游请求")
 		return
 	}
 	// 禁止 net/http 将带幂等 Header 的 POST 识别为可重放请求。
@@ -47,20 +52,40 @@ func (h *Handler) forward(writer http.ResponseWriter, incoming *http.Request, re
 		}
 	}
 	request.Header.Set("Authorization", "Bearer "+h.upstreamKey)
+	if h.clientAuth {
+		request.Header.Set("Authorization", incoming.Header.Get("Authorization"))
+	}
 	request.Header.Del("Proxy-Authorization")
 	request.ContentLength = int64(len(body))
 	request.Host = target.Host
 
+	h.trace.phase("forwarding")
+	// 握手失败未必具有公开的错误类型，通过标准跟踪回调确认失败阶段。
+	var tlsFailed atomic.Bool
+	request = request.WithContext(httptrace.WithClientTrace(request.Context(), &httptrace.ClientTrace{
+		TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
+			tlsFailed.Store(err != nil)
+		},
+	}))
 	response, err := h.client.Do(request)
 	if err != nil {
 		status := timeoutStatus(err)
-		h.complete(requestID, started, decision, nil, "upstream_error", "upstream_error")
-		writeError(writer, status, "upstream_error", "上游连接或超时错误")
+		code := ClassifyUpstreamError(incoming.Context(), err, tlsFailed.Load())
+		h.complete(requestID, started, decision, nil, upstreamFailureResult(code, "upstream_error"), code)
+		h.reject(writer, status, "upstream_error", "上游连接或超时错误")
+		h.trace.failure(code, redactCredentialString(err.Error(), []string{h.localToken, h.upstreamKey}))
 		return
 	}
 	defer response.Body.Close()
+	h.trace.update(func(e *RequestLogEntry) {
+		e.Phase = "responding"
+		e.UpstreamStatus = response.StatusCode
+		e.HeaderMS = time.Since(e.ReceivedAt).Milliseconds()
+		mediaType, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
+		e.Streaming = mediaType == "text/event-stream"
+	})
 	if response.StatusCode >= http.StatusBadRequest {
-		h.forwardUpstreamError(writer, response, requestID, started, decision)
+		h.forwardUpstreamError(incoming.Context(), writer, response, requestID, started, decision)
 		return
 	}
 	copyResponseHeaders(writer.Header(), response.Header)
@@ -68,18 +93,22 @@ func (h *Handler) forward(writer http.ResponseWriter, incoming *http.Request, re
 		writer.Header().Del("Location")
 	}
 	writer.Header().Set("x-gateway-request-id", requestID)
+	h.trace.status(response.StatusCode)
 	writer.WriteHeader(response.StatusCode)
 	copyError := copyResponse(writer, response.Body)
 	result := "completed"
 	errorCode := ""
 	if copyError != nil {
-		result = "upstream_stream_error"
-		errorCode = "upstream_error"
+		errorCode = ClassifyUpstreamError(incoming.Context(), copyError, false)
+		result = upstreamFailureResult(errorCode, "upstream_stream_error")
 	}
 	h.complete(requestID, started, decision, &response.StatusCode, result, errorCode)
+	if copyError != nil {
+		h.trace.failure(errorCode, redactCredentialString(copyError.Error(), []string{h.localToken, h.upstreamKey}))
+	}
 }
 
-func (h *Handler) forwardUpstreamError(writer http.ResponseWriter, response *http.Response, requestID string, started time.Time, decision security.Decision) {
+func (h *Handler) forwardUpstreamError(ctx context.Context, writer http.ResponseWriter, response *http.Response, requestID string, started time.Time, decision security.Decision) {
 	body, err := readUpstreamErrorBody(response, h.limits.MaxDecompressedBytes)
 	if err == nil {
 		body, err = sanitizeUpstreamErrorBody(body, response.Header.Get("Content-Type"), h.localToken, h.upstreamKey)
@@ -92,17 +121,20 @@ func (h *Handler) forwardUpstreamError(writer http.ResponseWriter, response *htt
 	writer.Header().Set("x-gateway-request-id", requestID)
 	if err != nil {
 		writer.Header().Set("Content-Type", "application/json")
-		writeError(writer, response.StatusCode, "upstream_error", "上游错误响应无法安全处理")
-		h.complete(requestID, started, decision, &response.StatusCode, "upstream_error", "upstream_error")
+		h.reject(writer, response.StatusCode, "upstream_error", "上游错误响应无法安全处理")
+		code := ClassifyUpstreamError(ctx, err, false)
+		h.complete(requestID, started, decision, &response.StatusCode, upstreamFailureResult(code, "upstream_error"), code)
 		return
 	}
 	writer.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	h.trace.status(response.StatusCode)
 	writer.WriteHeader(response.StatusCode)
-	result := "completed"
-	errorCode := ""
+	// 错误正文转发完成不代表请求成功，单独记录上游 HTTP 错误。
+	result := "upstream_http_error"
+	errorCode := "upstream_http_error"
 	if _, err := writer.Write(body); err != nil {
-		result = "upstream_stream_error"
-		errorCode = "upstream_error"
+		errorCode = ClassifyUpstreamError(ctx, err, false)
+		result = upstreamFailureResult(errorCode, "upstream_stream_error")
 	}
 	h.complete(requestID, started, decision, &response.StatusCode, result, errorCode)
 }
@@ -224,6 +256,13 @@ func copyResponse(writer http.ResponseWriter, source io.Reader) error {
 }
 
 func (h *Handler) complete(requestID string, started time.Time, decision security.Decision, upstreamStatus *int, result, errorCode string) {
+	if errorCode != "" {
+		detail := UpstreamErrorDetail(errorCode)
+		if errorCode == "upstream_http_error" && upstreamStatus != nil {
+			detail = "上游返回 HTTP " + strconv.Itoa(*upstreamStatus) + "，错误响应已转发"
+		}
+		h.trace.failure(errorCode, detail)
+	}
 	event := audit.Event{
 		EventType: "completion", RequestID: requestID, User: h.osUser,
 		RuleSetVersion: h.engine.RuleSetVersion(), Action: decision.Action, Result: result,
@@ -231,5 +270,6 @@ func (h *Handler) complete(requestID string, started time.Time, decision securit
 	}
 	if err := h.audit.Write(event); err != nil {
 		h.audit.MarkUnhealthy()
+		h.trace.update(func(e *RequestLogEntry) { e.AuditError = true })
 	}
 }

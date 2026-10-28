@@ -57,6 +57,8 @@ func (r runner) run(args []string) error {
 		return r.checkConfig(args[1:])
 	case "start":
 		return r.start(args[1:])
+	case "desktop":
+		return r.desktop(args[1:])
 	case "policy":
 		return r.policy(args[1:])
 	case "version":
@@ -78,6 +80,7 @@ func (r runner) usage() {
   init          创建 policy.db、audit.db 和初始 Schema
   check-config  校验启动配置、数据库和规则
   start         启动本地安全网关
+  desktop       启动 Windows 托盘或 macOS 菜单栏和可视化配置界面
   policy        管理本地安全规则
   version       显示版本信息`)
 }
@@ -192,6 +195,9 @@ func (r runner) start(args []string) error {
 	upstream, err := url.Parse(cfg.Upstream)
 	if err != nil {
 		return err
+	}
+	if upstream.Scheme == "http" {
+		fmt.Fprintln(r.stderr, "警告: upstream 使用 HTTP，Prompt 和上游认证信息将以明文传输")
 	}
 	client, err := newUpstreamHTTPClient(cfg.UpstreamHeaderTimeout)
 	if err != nil {

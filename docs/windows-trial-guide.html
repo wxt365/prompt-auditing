@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>codex-gateway 使用说明</title>
+<style>
+body{font:15px/1.85 "Segoe UI","Microsoft YaHei",sans-serif;color:#243247;background:#f3f5f8;margin:0}main{max-width:900px;margin:24px auto;background:#fff;padding:30px 38px;border:1px solid #dfe5ed;border-radius:10px}h1{font-size:27px;margin:0}h2{font-size:20px;margin:30px 0 12px;padding-top:16px;border-top:1px solid #e2e8f0}h3{font-size:16px;margin:20px 0 8px}p{margin:8px 0 14px}li{margin:6px 0}code,pre{font-family:Consolas,"Microsoft YaHei",monospace;background:#f0f4f9;border-radius:4px}code{padding:2px 5px;overflow-wrap:anywhere}pre{padding:14px;white-space:pre-wrap;overflow-wrap:anywhere}table{border-collapse:collapse;width:100%;font-size:14px}th,td{border:1px solid #e1e6ee;padding:9px 12px;text-align:left;vertical-align:top}th{background:#f6f8fb}.intro{color:#64748b}.note{border-left:4px solid #3877ea;padding:10px 15px;background:#f0f5ff}.warn{border-left:4px solid #dc8b23;padding:10px 15px;background:#fff7ea}.tag{display:inline-block;padding:1px 7px;border-radius:4px;font-size:13px;font-weight:600}.red{color:#a12821;background:#fee1dc}.blue{color:#2454b0;background:#eaf1ff}.gold{color:#8a5700;background:#fff3d3}.grey{color:#64748b;background:#edf1f5}a{color:#2459cb}footer{color:#64748b;font-size:13px;margin-top:28px}@media(max-width:650px){main{margin:0;border:0;border-radius:0;padding:22px 16px}table{font-size:13px}th,td{padding:7px}}
+</style>
+</head>
+<body><main>
+<h1>codex-gateway 使用说明</h1>
+<p class="intro">Windows 64 位试用版 · trial-20261028.3 · 2026 年 10 月 28 日</p>
+<p>本程序在客户端与模型服务之间提供本地审计代理：检查请求、替换敏感字、阻止违规请求，并通过浏览器管理页查看规则与日志。支持 <code>/v1/responses</code> 和 <code>/v1/chat/completions</code>，保持原协议转发，支持普通 JSON 及 SSE 流式响应。</p>
+<p class="note">解压后运行 <strong>codex-gateway.exe</strong>。不需要安装 Go、Node.js、Python 或额外桌面运行时。需要 Windows x64 系统、浏览器，以及客户端原先可以访问的上游 API 服务和认证凭证。</p>
+
+<h2>一、首次使用</h2>
+<ol>
+<li>将压缩包解压到固定目录，在资源管理器中双击 <code>codex-gateway.exe</code>。首次启动会打开浏览器管理页，显示“待配置上游”，尚不启动代理；关闭后再次启动仍会提示配置。在 Windows 右下角通知区域显示盾牌图标；如未看到，可展开隐藏图标区域。</li>
+<li>在“连接设置”中保留默认监听端口 <code>18080</code>，或填写其他未占用的端口。仅监听本机。</li>
+<li>将“上游 API 地址”填写为原先客户端使用的 API 基础地址，例如 <code>https://api.example.com/v1</code>。不要填写本程序的本地地址，否则会形成代理循环。</li>
+<li>通常选择“沿用客户端认证”。客户端继续使用原有 API Key，网关无需再填写 Key，也不会读取客户端的认证文件。</li>
+<li>可点击“检查上游连接”检查当前填写的地址，无需先保存。随后点击“保存并应用”，确认顶部显示“本地代理运行中”，再将客户端的 API 基础地址改为 <code>http://127.0.0.1:18080/v1</code>。修改监听端口时，请同步修改客户端地址。</li>
+<li>先发送一条简短普通消息。若收到回复，再用实际工作内容测试。接入问题可按第五节排查。</li>
+</ol>
+<p>调用链：<strong>客户端 → 本机 codex-gateway → 配置的上游 API 服务</strong>。管理页使用启动时自动分配的另一个端口，请从托盘打开；不要把管理页地址填入客户端。</p>
+<p>保存设置、应用规则或启停时，顶部会显示正在执行的操作。等待在途请求结束期间，仍可切换到运行状态、审计日志或实时日志查看进展；保存和启停按钮暂时禁用，操作结束后恢复。</p>
+<p class="note">连接检查最多等待 5 秒，向填写的上游基础地址追加 <code>/models</code>，发送不带认证或正文的 HEAD 请求，不调用模型、不跟随重定向，也不保存配置或重启代理。收到任何 HTTP 状态（包括 401、404、405、500）仅说明网络与 HTTP 可达；请结合显示的状态判断，密钥、模型与完整请求仍需实际调用验证。“本地代理运行中”也不代表上游可用。已有配置升级后保持原启动方式。</p>
+
+<p>检查结果：HTTP 2xx 显示绿色；收到重定向或 HTTP 4xx/5xx 时显示黄色并解释含义。404 仅表示检查路径 <code>/models</code> 返回未找到，不能据此判断模型请求接口不可用；405 表示该路径不接受 HEAD 方法。只有无法完成网络连接或超时等情况显示红色。认证、模型及协议兼容性仍以客户端实际请求为准。</p>
+
+<h2>二、客户端与认证设置</h2>
+<table><thead><tr><th>项目</th><th>设置方式</th></tr></thead><tbody>
+<tr><td>API 基础地址 / Base URL</td><td><code>http://127.0.0.1:18080/v1</code>；端口以管理页“客户端接入”显示为准。</td></tr>
+<tr><td>模型名称</td><td>保持上游服务支持的模型名。网关不提供模型、不转换模型名。</td></tr>
+<tr><td>Responses</td><td>客户端选择 Responses，网关转发到上游的 <code>/v1/responses</code>。支持省略消息 <code>type</code> 的 <code>role/content</code> 简写。支持历史 <code>output_text.logprobs</code>、非空引用信息和各层 <code>metadata</code>。两种接口的普通 JSON 扩展字段均递归审计并保留转发，不再要求逐项登记字段名；未知 JSON 类型也参与检查，是否被模型接口接受由上游决定。</td></tr>
+<tr><td>Chat Completions</td><td>客户端选择 Chat Completions，网关转发到上游的 <code>/v1/chat/completions</code>。适用于提供 OpenAI 兼容接口的客户端。</td></tr>
+<tr><td>沿用客户端认证（推荐）</td><td>保留客户端原有 API Key。认证头转发给固定上游，由上游验证；认证头不参与内容规则检测。</td></tr>
+<tr><td>由网关配置上游 API Key</td><td>在管理页填写上游 Key，保存后点击“复制本地令牌”，将令牌作为客户端的认证密钥。上游 Key 由 Windows 系统加密保存，不回显。</td></tr>
+</tbody></table>
+<p>Codex 用户：只修改当前实际使用的模型提供商配置中的 <code>base_url</code>，保留已有的模型、<code>wire_api</code> 和认证设置。应用是否需要重启或重新连接，取决于客户端如何加载配置。建议先用独立测试客户端验证，避免影响正在工作的会话。</p>
+<p class="warn">网关不做 Responses 与 Chat Completions 互转。客户端所选协议也必须被上游支持。上游使用 HTTP 时，请求和认证信息以明文在本机与上游之间传输。</p>
+
+<h2>三、安全规则</h2>
+<p>进入“安全规则”，可以启用、关闭、编辑或新增规则。输入便于理解的规则名称，内部 ID 自动生成；编辑完成后点击“保存并应用规则”。</p>
+<table><thead><tr><th>首次运行的默认规则</th><th>默认行为</th></tr></thead><tbody>
+<tr><td>敏感字替换</td><td>已启用，预置 16 组映射，不区分大小写。</td></tr>
+<tr><td>敏感字拦截</td><td>已启用，预置 36 个关键字，不区分大小写。</td></tr>
+<tr><td>API 密钥检测</td><td>已启用，命中内置密钥正则时阻断。检查的是请求正文中的文本，不检查认证头；并非覆盖所有厂商的密钥格式。</td></tr>
+<tr><td>密码检测</td><td>已启用，对匹配密码赋值格式的请求正文进行阻断。</td></tr>
+<tr><td>私网 IPv4 检测</td><td>默认关闭，需要时可手动启用；启用后仅告警，本身不会阻断请求。升级保留已有开关设置。</td></tr>
+</tbody></table>
+<p><strong>处理顺序：先替换，再检查拦截。</strong>能替换且替换后不再命中的请求可以放行；替换后仍有违规内容，或者模型名、工具名等不可安全替换的位置命中替换规则，则阻断。替换只执行一次，不级联替换。规则检查也包含支持的历史消息、工具文本等，并非仅检查最新一句话。</p>
+<p>Responses 支持已登记的图片和工具历史；图片原样转发，不识别图片内文字。Chat Completions 目前支持文本及登记的工具结构。音频、文件及其他未支持结构可能在本地被拒绝。当前规则检查请求内容，不检查模型响应正文。</p>
+
+<h2>四、查看阻断原因与调试日志</h2>
+<h3>审计日志</h3>
+<p>进入“审计日志”，按请求 ID、规则名称或时间查询，默认显示阻断与拒绝记录。点击“查看详情”打开弹窗：</p>
+<ul>
+<li>顶部直接列出<strong>阻断规则</strong>；表格将阻断规则置顶，并以红色背景显示。</li>
+<li><span class="tag red">导致阻断</span> 表示该命中参与了阻断。如说明为“此位置不可安全替换，转为阻断”，则原本的替换规则因位置限制而拒绝请求。</li>
+<li><span class="tag blue">替换预检</span> 表示该命中可替换，但整个请求因其他原因被阻断，未发往上游；通过检查的请求则显示“执行替换”。</li>
+<li><span class="tag gold">仅告警</span> 不会单独导致阻断。<span class="tag grey">未记录</span> 表示旧日志未保存逐条动作，无法可靠还原具体阻断规则，需重新发起测试。</li>
+<li>规则阻断记录可点击“展开请求内容”，查看已保存的原始请求及关键字高亮，并下载完整 JSON。当前请求的认证凭证已脱敏；正则和私网 IPv4 命中不保存原始匹配文本，不会高亮。</li>
+</ul>
+<p>多条阻断规则可以同时命中，网关会列出全部已记录的阻断规则。只显示请求最终“阻断”并不表示其他告警或替换规则也在阻止请求。</p>
+<h3>实时日志</h3>
+<p>进入“实时日志”并开启采集，然后复现问题。页面显示请求接口、阶段、本地 HTTP、上游 HTTP、耗时及错误代码，每秒刷新，内存最多保留 500 条。重启程序后默认关闭；不记录完整请求和响应正文。</p>
+<table><thead><tr><th>现象</th><th>判断方法</th></tr></thead><tbody>
+<tr><td>本地拒绝，上游状态为“—”</td><td>请求未发送上游。规则阻断通常为 403；非法 JSON、已知字段类型错误或未支持附件通常为 422。查看审计详情或错误代码。</td></tr>
+<tr><td>上游返回 401 / 403</td><td>检查客户端认证、网关认证方式以及上游权限。</td></tr>
+<tr><td>上游返回 404 / 422</td><td>核对上游地址、协议、模型名及上游支持的请求字段，结合错误信息判断。</td></tr>
+<tr><td>客户端已断开</td><td>表示客户端请求上下文已取消，可能是停止、重试或客户端超时；不能仅据此断定用户主动关闭。</td></tr>
+<tr><td>HTTP 200 但回复不完整</td><td>200 可能只代表流式响应头已返回；还需查看请求最终阶段是否完成、是否发生响应流中断。</td></tr>
+</tbody></table>
+
+<h2>五、常见问题</h2>
+<h3>程序没有窗口，是不是没启动？</h3>
+<p>程序以托盘方式运行，不常驻任务栏窗口。单击右下角盾牌图标，或右键选择“打开配置界面”。关闭浏览器页面不会退出代理。需要关闭时，从托盘选择“退出”。同一 Windows 用户只运行一个实例，不支持自动开机启动。</p>
+<h3>提示端口占用 / 无法监听</h3>
+<p>从托盘打开管理页，将监听端口改为未占用的端口，例如 <code>38080</code>，保存后同步修改客户端地址。代理端口不能与管理页或其他服务共用；网关不会自动换端口。保存连接设置会重启代理，建议等当前请求结束后操作。</p>
+<h3>接入后不能回复，如何快速定位？</h3>
+<ol><li>若顶部为“待配置上游”，先填写并保存实际上游地址；确认“本地代理运行中”，检查客户端地址与管理页显示一致，且网关进程持续运行。</li><li>使用“检查上游连接”检查网络与 HTTP 可达性；即使检查收到了 HTTP 响应，仍需验证实际认证与模型请求。</li><li>开启实时日志，发送简短消息。没有日志时优先检查客户端连接地址；有日志则根据本地和上游状态区分拒绝位置。</li><li>403 时查看阻断规则及历史消息；422 时查看具体字段路径。向维护者反馈软件版本、请求 ID、时间、协议和错误代码，避免提供真实密钥。</li><li>检查上游是否支持客户端选择的协议。同一网关的 Chat Completions 可用，不代表上游也支持 Responses。</li></ol>
+<h3>新增字段是否还会出现“未登记”？</h3>
+<p>普通 JSON 扩展的键名、字符串值和嵌套内容均参与规则检查，通过后保留转发。已知正文仍先替换后检查；扩展协议字段默认不替换，命中替换规则时按“不可安全替换”阻断，避免改坏元数据。合法 Responses 图片保持原样；音频、文件附件、非法 JSON、重复键、过深嵌套和已知字段类型错误仍拒绝。此策略不代表上游支持所有扩展，也不具备编码内容解码、文件扫描或图片文字识别能力。</p>
+<h3>为什么其他人第一次启动没有我的上游地址？</h3>
+<p>试用包只包含程序、内置规则与说明。每位用户需要在管理页填写自己的上游地址和认证配置；不会分发原使用者的配置库、密钥或审计日志。</p>
+<h3>升级、回退与数据位置</h3>
+<p>设置和日志保存在 <code>%APPDATA%\CodexSecurityGateway</code>，与 EXE 所在目录分离。升级前从托盘退出旧版，备份整个数据目录，再启动新版。新版自动升级规则库和审计库到版本 3，保留已有规则及日志，默认规则只写入新建库；旧记录缺少逐条动作时不会猜测补写。</p>
+<p class="warn">旧版不能直接打开升级后的数据库。需要回退时，先退出新版，再恢复升级前的整份备份并启动相应旧版。备份数据应妥善保管；审计库中可能保存被阻断请求的原文。卸载只需退出程序后删除解压目录；是否保留数据目录由用户决定。</p>
+<p>试用程序尚未进行数字签名。如果 Windows 显示未知发布者，请先确认包的来源并核对校验值；受组织管理的设备按本单位软件使用规定处理。</p>
+
+<h2>六、文件与校验</h2>
+<table><thead><tr><th>文件</th><th>用途</th></tr></thead><tbody>
+<tr><td><code>codex-gateway.exe</code></td><td>Windows x64 托盘程序，可直接运行。</td></tr>
+<tr><td><code>使用说明.html</code></td><td>本文档，双击可离线阅读。</td></tr>
+<tr><td><code>SHA256SUMS.txt</code></td><td>程序及说明文档的 SHA-256 校验值。</td></tr>
+</tbody></table>
+<p>在解压目录打开 PowerShell，可执行以下命令核对 EXE：</p>
+<pre>Get-FileHash -Algorithm SHA256 -LiteralPath .\codex-gateway.exe</pre>
+<p>试用包已完成自动化检查与本地模拟上游验证；不同厂商、客户端及私有协议的完整兼容性仍需实际试用确认。</p>
+<footer>版本：trial-20261028.3 · 本说明可在离线环境直接打开。</footer>
+</main></body></html>

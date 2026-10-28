@@ -15,7 +15,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 1
+const schemaVersion = 3
 
 type databaseKind string
 
@@ -57,6 +57,13 @@ func InitDatabases(ctx context.Context, policyPath, auditPath string) error {
 		if err != nil {
 			cleanup()
 			return err
+		}
+		if item.kind == policyDatabase {
+			if err := seedBundledRules(ctx, db); err != nil {
+				_ = db.Close()
+				cleanup()
+				return fmt.Errorf("初始化默认规则: %w", err)
+			}
 		}
 		if err := db.Close(); err != nil {
 			cleanup()
@@ -109,7 +116,7 @@ func openDatabase(ctx context.Context, path string, kind databaseKind, initializ
 		return nil, err
 	}
 	if !initialize {
-		if err := verifyMigrationState(ctx, db); err != nil {
+		if _, err := readMigrationVersion(ctx, db); err != nil {
 			return closeWithError(fmt.Errorf("数据库未初始化或迁移状态无效 %s: %w", path, err))
 		}
 	}
@@ -119,10 +126,16 @@ func openDatabase(ctx context.Context, path string, kind databaseKind, initializ
 	if err := secureSQLiteSidecars(path); err != nil {
 		return closeWithError(err)
 	}
-	if initialize {
-		if err := migrateDatabase(ctx, db, kind); err != nil {
-			return closeWithError(fmt.Errorf("迁移 SQLite %s: %w", path, err))
+	if !initialize {
+		if err := verifyDatabase(ctx, db, kind); err != nil {
+			return closeWithError(fmt.Errorf("迁移前校验 SQLite %s: %w", path, err))
 		}
+	}
+	if err := migrateDatabase(ctx, db, kind); err != nil {
+		return closeWithError(fmt.Errorf("迁移 SQLite %s: %w", path, err))
+	}
+	if err := secureSQLiteSidecars(path); err != nil {
+		return closeWithError(err)
 	}
 	if err := verifyDatabase(ctx, db, kind); err != nil {
 		return closeWithError(fmt.Errorf("校验 SQLite %s: %w", path, err))
@@ -131,24 +144,35 @@ func openDatabase(ctx context.Context, path string, kind databaseKind, initializ
 }
 
 func verifyMigrationState(ctx context.Context, db *sql.DB) error {
-	var migrationTable int
-	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='schema_migrations'").Scan(&migrationTable); err != nil {
+	version, err := readMigrationVersion(ctx, db)
+	if err != nil {
 		return err
 	}
+	if version != schemaVersion {
+		return errors.New("数据库需要先由网关启动过程升级")
+	}
+	return nil
+}
+
+func readMigrationVersion(ctx context.Context, db *sql.DB) (int, error) {
+	var migrationTable int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='schema_migrations'").Scan(&migrationTable); err != nil {
+		return 0, err
+	}
 	if migrationTable != 1 {
-		return errors.New("缺少 schema_migrations，必须先执行 init")
+		return 0, errors.New("缺少 schema_migrations，必须先执行 init")
 	}
 	var current, migrations int
 	if err := db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0), COUNT(*) FROM schema_migrations").Scan(&current, &migrations); err != nil {
-		return err
+		return 0, err
 	}
 	if current > schemaVersion {
-		return fmt.Errorf("数据库版本 %d 高于程序支持版本 %d", current, schemaVersion)
+		return 0, fmt.Errorf("数据库版本 %d 高于程序支持版本 %d", current, schemaVersion)
 	}
-	if current != schemaVersion || migrations != schemaVersion {
-		return fmt.Errorf("数据库迁移状态无效: current=%d count=%d", current, migrations)
+	if current < 1 || migrations != current {
+		return 0, fmt.Errorf("数据库迁移状态无效: current=%d count=%d", current, migrations)
 	}
-	return nil
+	return current, nil
 }
 
 func sqliteDSN(path string) string {
@@ -156,7 +180,11 @@ func sqliteDSN(path string) string {
 	if err != nil {
 		absolute = path
 	}
-	return (&url.URL{Scheme: "file", Path: filepath.ToSlash(absolute)}).String()
+	uriPath := filepath.ToSlash(absolute)
+	if !strings.HasPrefix(uriPath, "/") {
+		uriPath = "/" + uriPath
+	}
+	return (&url.URL{Scheme: "file", Path: uriPath}).String()
 }
 
 func configureDatabase(ctx context.Context, db *sql.DB, initialize bool) error {
@@ -230,7 +258,7 @@ func verifySchema(ctx context.Context, db *sql.DB, kind databaseKind) error {
 	if err := db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0), COUNT(*) FROM schema_migrations").Scan(&current, &migrations); err != nil {
 		return err
 	}
-	if current != schemaVersion || migrations != schemaVersion {
+	if current < 1 || current > schemaVersion || migrations != current {
 		return fmt.Errorf("数据库迁移状态无效: current=%d count=%d", current, migrations)
 	}
 	required := map[databaseKind]map[string][]string{
@@ -251,7 +279,29 @@ func verifySchema(ctx context.Context, db *sql.DB, kind databaseKind) error {
 			}
 		}
 	}
+	if current >= 2 {
+		columnQuery := "SELECT name FROM policy_rules LIMIT 0"
+		if kind == auditDatabase {
+			columnQuery = "SELECT rule_name FROM audit_matches LIMIT 0"
+		}
+		rows, err := db.QueryContext(ctx, columnQuery)
+		if err != nil {
+			return fmt.Errorf("规则名称字段缺失: %w", err)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+	}
 	if kind == auditDatabase {
+		if current >= 3 {
+			rows, err := db.QueryContext(ctx, "SELECT action, reason FROM audit_matches LIMIT 0")
+			if err != nil {
+				return fmt.Errorf("命中处置字段缺失: %w", err)
+			}
+			if err := rows.Close(); err != nil {
+				return err
+			}
+		}
 		expectedIndexes := map[string][]string{
 			"idx_audit_events_occurred_at":   {"occurred_at"},
 			"idx_audit_events_request_id":    {"request_id"},
@@ -339,7 +389,7 @@ func migrateDatabase(ctx context.Context, db *sql.DB, kind databaseKind) error {
 	if current == schemaVersion {
 		return nil
 	}
-	if current != 0 {
+	if current != 0 && current != 1 && current != 2 {
 		return fmt.Errorf("不支持从数据库版本 %d 迁移", current)
 	}
 
@@ -348,22 +398,37 @@ func migrateDatabase(ctx context.Context, db *sql.DB, kind databaseKind) error {
 		return err
 	}
 	defer tx.Rollback()
-	statements := []string{`CREATE TABLE schema_migrations (
+	statements := []string{}
+	if current == 0 {
+		statements = append(statements, `CREATE TABLE schema_migrations (
 		version INTEGER PRIMARY KEY,
 		applied_at TEXT NOT NULL
-	)`}
-	if kind == policyDatabase {
-		statements = append(statements, policyMigrationV1...)
-	} else {
-		statements = append(statements, auditMigrationV1...)
+	)`)
+		if kind == policyDatabase {
+			statements = append(statements, policyMigrationV1...)
+		} else {
+			statements = append(statements, auditMigrationV1...)
+		}
+		statements = append(statements, "INSERT INTO schema_migrations(version, applied_at) VALUES(1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))")
 	}
+	if current < 2 {
+		if kind == policyDatabase {
+			statements = append(statements, "ALTER TABLE policy_rules ADD COLUMN name TEXT NOT NULL DEFAULT ''",
+				`UPDATE policy_rules SET name = CASE id WHEN 'credential.openai-api-key' THEN 'API 密钥检测' WHEN 'credential.password-assignment' THEN '密码检测' WHEN 'network.private-ipv4' THEN '私网 IPv4 检测' ELSE id END`)
+		} else {
+			statements = append(statements, "ALTER TABLE audit_matches ADD COLUMN rule_name TEXT NOT NULL DEFAULT ''")
+		}
+		statements = append(statements, "INSERT INTO schema_migrations(version, applied_at) VALUES(2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))")
+	}
+	if kind == auditDatabase {
+		statements = append(statements, "ALTER TABLE audit_matches ADD COLUMN action TEXT NOT NULL DEFAULT ''",
+			"ALTER TABLE audit_matches ADD COLUMN reason TEXT NOT NULL DEFAULT ''")
+	}
+	statements = append(statements, "INSERT INTO schema_migrations(version, applied_at) VALUES(3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))")
 	for _, statement := range statements {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("执行迁移: %w", err)
 		}
-	}
-	if _, err := tx.ExecContext(ctx, "INSERT INTO schema_migrations(version, applied_at) VALUES(1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"); err != nil {
-		return err
 	}
 	return tx.Commit()
 }
@@ -406,7 +471,7 @@ var policyMigrationV1 = []string{
 		VALUES('credential.password-assignment', 'regex', 'block', 1, 0, '(?:password|passwd|pwd)\s*[:=]\s*[^\s,;]{4,}', NULL,
 		strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`,
 	`INSERT INTO policy_rules(id, type, action, enabled, case_sensitive, pattern, replacement, created_at, updated_at)
-		VALUES('network.private-ipv4', 'private_ipv4', 'warn', 1, 0, NULL, NULL,
+		VALUES('network.private-ipv4', 'private_ipv4', 'warn', 0, 0, NULL, NULL,
 		strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`,
 }
 

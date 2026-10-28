@@ -171,15 +171,25 @@ func verifyOwnerOnlyACL(path string) error {
 		return fmt.Errorf("读取 Windows ACL: %w", err)
 	}
 	dacl, _, err := descriptor.DACL()
-	if err != nil || dacl == nil || dacl.AceCount != 1 {
+	if err != nil || dacl == nil || dacl.AceCount == 0 {
 		return fmt.Errorf("ACL 不是当前用户独占: %s", path)
 	}
-	var ace *windows.ACCESS_ALLOWED_ACE
-	if err := windows.GetAce(dacl, 0, &ace); err != nil {
-		return fmt.Errorf("读取 Windows ACL 条目: %w", err)
+	var permissions windows.ACCESS_MASK
+	for index := uint32(0); index < uint32(dacl.AceCount); index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, index, &ace); err != nil {
+			return fmt.Errorf("读取 Windows ACL 条目: %w", err)
+		}
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || !(*windows.SID)(unsafe.Pointer(&ace.SidStart)).Equals(sid) {
+			return fmt.Errorf("ACL 不是当前用户独占: %s", path)
+		}
+		// Windows 会将目录权限拆为当前对象和仅供子对象继承的条目，并映射通用权限。
+		if ace.Header.AceFlags&windows.INHERIT_ONLY_ACE == 0 {
+			permissions |= ace.Mask
+		}
 	}
-	aceSID := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
-	if !aceSID.Equals(sid) || ace.Mask&windows.GENERIC_ALL == 0 {
+	const fileAllAccess windows.ACCESS_MASK = windows.STANDARD_RIGHTS_REQUIRED | windows.SYNCHRONIZE | 0x1ff
+	if permissions&windows.GENERIC_ALL == 0 && permissions&fileAllAccess != fileAllAccess {
 		return fmt.Errorf("ACL 不是当前用户独占: %s", path)
 	}
 	return nil

@@ -24,7 +24,10 @@ type Event struct {
 }
 
 type Match struct {
+	Action         string
+	Reason         string
 	RuleID         string
+	RuleName       string
 	Category       string
 	MatchedKeyword string
 }

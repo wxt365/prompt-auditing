@@ -44,7 +44,7 @@ func TestInitDatabasesCreatesVerifiedIndependentSchemas(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if set.Version != "1" || len(set.Rules) != 3 {
+	if set.Version != "1" || len(set.Rules) != 5 {
 		t.Fatalf("初始规则集错误: %#v", set)
 	}
 	if err := CheckAudit(ctx, auditPath); err != nil {
@@ -119,7 +119,7 @@ func TestPolicyWritesAndVersionIncrementAreAtomic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if beforeFailure.Version != "3" || len(beforeFailure.Rules) != 5 {
+	if beforeFailure.Version != "3" || len(beforeFailure.Rules) != 7 {
 		t.Fatalf("写入后的快照错误: %#v", beforeFailure)
 	}
 	if err := store.AddReplacement(ctx, "mapping.conflict", []Mapping{{Source: "内部系统A", Target: "另一个系统"}}, false); err == nil {
@@ -175,7 +175,7 @@ func TestPolicyLoadReturnsOneTransactionalSnapshotDuringConcurrentWrites(t *test
 		if err != nil {
 			t.Fatal(err)
 		}
-		if version != len(set.Rules)-2 {
+		if version != len(set.Rules)-4 {
 			t.Fatalf("规则快照混合了不同事务: version=%d rules=%d", version, len(set.Rules))
 		}
 		select {
@@ -436,7 +436,7 @@ func TestHigherSchemaVersionAndBroadPermissionsAreRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("UPDATE schema_migrations SET version=2"); err != nil {
+	if _, err := db.Exec("UPDATE schema_migrations SET version=? WHERE version=?", schemaVersion+1, schemaVersion); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()

@@ -63,10 +63,6 @@ func (store *AuditStore) MarkUnhealthy() {
 	store.healthy.Store(false)
 }
 
-func (store *AuditStore) Fingerprint([]byte) string {
-	return ""
-}
-
 func (store *AuditStore) Write(event audit.Event) error {
 	return store.WriteEvent(context.Background(), event)
 }
@@ -129,8 +125,8 @@ func (store *AuditStore) WriteEvent(ctx context.Context, event audit.Event) erro
 	}
 	for index, match := range uniqueAuditMatches(event.Matches) {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO audit_matches
-			(event_id, ordinal, rule_id, category, matched_keyword) VALUES(?, ?, ?, ?, NULLIF(?, ''))`,
-			eventID, index, match.RuleID, match.Category, match.MatchedKeyword); err != nil {
+			(event_id, ordinal, rule_id, rule_name, category, matched_keyword, action, reason) VALUES(?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?)`,
+			eventID, index, match.RuleID, match.RuleName, match.Category, match.MatchedKeyword, match.Action, match.Reason); err != nil {
 			return fmt.Errorf("写入审计命中明细: %w", err)
 		}
 	}
@@ -148,7 +144,7 @@ func uniqueAuditMatches(matches []audit.Match) []audit.Match {
 	seen := make(map[string]struct{}, len(matches))
 	result := make([]audit.Match, 0, len(matches))
 	for _, match := range matches {
-		key := match.RuleID + "\x00" + match.Category + "\x00" + match.MatchedKeyword
+		key := match.RuleID + "\x00" + match.Category + "\x00" + match.MatchedKeyword + "\x00" + match.Action + "\x00" + match.Reason
 		if _, exists := seen[key]; exists {
 			continue
 		}

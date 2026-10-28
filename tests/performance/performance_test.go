@@ -104,8 +104,7 @@ type performanceAuditor struct {
 	unhealthy bool
 }
 
-func (*performanceAuditor) Write(audit.Event) error   { return nil }
-func (*performanceAuditor) Fingerprint([]byte) string { return "" }
+func (*performanceAuditor) Write(audit.Event) error { return nil }
 func (auditor *performanceAuditor) Healthy() bool {
 	auditor.mu.Lock()
 	defer auditor.mu.Unlock()

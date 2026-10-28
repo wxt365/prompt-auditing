@@ -13,22 +13,16 @@ import (
 
 const maxJSONDepth = 128
 
-var supportedRootFields = map[string]bool{
-	"background": true, "client_metadata": true, "conversation": true, "include": true, "input": true,
-	"instructions": true, "max_output_tokens": true, "max_tool_calls": true,
-	"metadata": true, "model": true, "parallel_tool_calls": true, "prompt": true,
-	"prompt_cache_key": true, "prompt_cache_retention": true, "reasoning": true,
-	"safety_identifier": true, "service_tier": true, "store": true, "stream": true,
-	"stream_options": true, "temperature": true, "text": true, "tool_choice": true,
-	"tools": true, "top_logprobs": true, "top_p": true, "truncation": true, "user": true,
-}
-
 var unsupportedKeys = map[string]bool{
 	"file": true, "file_data": true, "file_id": true, "file_url": true,
 	"image": true, "image_url": true, "input_audio": true, "audio": true,
 }
 
 func Extract(body []byte) (Payload, error) {
+	return extractPayload(body, validateRegisteredStructure)
+}
+
+func extractPayload(body []byte, validate func(map[string]any) error) (Payload, error) {
 	if !utf8.Valid(body) {
 		return Payload{}, errors.New("请求体包含非法 UTF-8")
 	}
@@ -48,8 +42,13 @@ func Extract(body []byte) (Payload, error) {
 		}
 		return Payload{}, fmt.Errorf("JSON 尾部无效: %w", err)
 	}
-	if err := validateRegisteredStructure(root.(map[string]any)); err != nil {
-		return Payload{}, fmt.Errorf("请求体结构未登记: %w", err)
+	if err := validate(root.(map[string]any)); err != nil {
+		return Payload{}, fmt.Errorf("请求体结构无效: %w", err)
+	}
+	for index := range texts {
+		if texts[index].Maskable && !knownTextContainer(root, texts[index].Path) {
+			texts[index].Maskable = false
+		}
 	}
 	return Payload{Root: root, Texts: texts}, nil
 }
@@ -86,27 +85,40 @@ func decodeValue(decoder *json.Decoder, path, key string, depth int, texts *[]Te
 				return nil, fmt.Errorf("JSON 对象包含重复键: %s", childKey)
 			}
 			seen[childKey] = struct{}{}
-			if unsupportedKeys[childKey] && !isJSONSchemaPath(path) {
+			if unsupportedKeys[childKey] && !isJSONSchemaPath(path) && !(childKey == "image_url" && isImageContentPath(path)) {
 				return nil, fmt.Errorf("不支持的附件字段: %s", childKey)
 			}
 			childPath := path + "/" + escapePointer(childKey)
-			if isDynamicObjectKey(path) {
-				*texts = append(*texts, Text{Path: childPath, Value: childKey})
-			}
+			// 扩展字段名也可能携带业务内容；键名只检查，不做替换。
+			*texts = append(*texts, Text{Path: childPath, Value: childKey})
 			child, err := decodeValue(decoder, childPath, childKey, depth+1, texts)
 			if err != nil {
 				return nil, err
-			}
-			if depth == 0 && !supportedRootFields[childKey] && containsTextOrStructure(child) {
-				return nil, fmt.Errorf("未登记字段包含可检查内容: %s", childKey)
 			}
 			object[childKey] = child
 		}
 		if _, err := decoder.Token(); err != nil {
 			return nil, err
 		}
-		if rawType, ok := object["type"].(string); ok && unsupportedType(rawType) {
+		if rawType, ok := object["type"].(string); ok && unsupportedType(rawType) && !(rawType == "input_image" && isImageContentPath(path)) {
 			return nil, fmt.Errorf("不支持的附件或二进制内容类型: %s", rawType)
+		}
+		if image, exists := object["image_url"]; exists && isImageContentPath(path) {
+			if object["type"] != "input_image" {
+				return nil, fmt.Errorf("%s/image_url 必须属于 input_image 内容", path)
+			}
+			if err := validateImageURL(image, path+"/image_url"); err != nil {
+				return nil, err
+			}
+			// 仅在对象类型和图片格式确认后豁免图片数据，防止扩展对象借此跳过检查。
+			if strings.HasPrefix(image.(string), "data:") {
+				for index := len(*texts) - 1; index >= 0; index-- {
+					if (*texts)[index].Path == path+"/image_url" && (*texts)[index].Value == image {
+						*texts = append((*texts)[:index], (*texts)[index+1:]...)
+						break
+					}
+				}
+			}
 		}
 		return object, nil
 	case '[':
@@ -127,48 +139,89 @@ func decodeValue(decoder *json.Decoder, path, key string, depth int, texts *[]Te
 	}
 }
 
+func isImageContentPath(path string) bool {
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	if len(parts) != 4 || parts[0] != "input" || (parts[2] != "content" && parts[2] != "output") {
+		return false
+	}
+	_, firstErr := strconv.Atoi(parts[1])
+	_, secondErr := strconv.Atoi(parts[3])
+	return firstErr == nil && secondErr == nil
+}
+
 func isJSONSchemaPath(path string) bool {
 	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	if len(parts) >= 3 && parts[0] == "response_format" && parts[1] == "json_schema" && parts[2] == "schema" {
+		return true
+	}
+	if len(parts) >= 3 && parts[0] == "functions" && parts[2] == "parameters" {
+		_, err := strconv.Atoi(parts[1])
+		return err == nil
+	}
+	if len(parts) >= 4 && parts[0] == "tools" && parts[2] == "function" && parts[3] == "parameters" {
+		_, err := strconv.Atoi(parts[1])
+		return err == nil
+	}
 	if len(parts) >= 3 && parts[0] == "text" && parts[1] == "format" && parts[2] == "schema" {
 		return true
 	}
-	if len(parts) < 3 || parts[0] != "tools" || parts[2] != "parameters" {
-		return false
+	for index, part := range parts {
+		if part == "parameters" && isResponsesToolPath("/"+strings.Join(parts[:index], "/")) {
+			return true
+		}
 	}
-	_, err := strconv.Atoi(parts[1])
-	return err == nil
+	return false
 }
 
-func isDynamicObjectKey(path string) bool {
-	if path == "/metadata" || path == "/client_metadata" || path == "/prompt/variables" {
-		return true
-	}
-	if !isJSONSchemaPath(path) {
-		return false
-	}
+// 工具定义可位于顶层或 additional_tools 历史项中，并可按 namespace 嵌套。
+func isResponsesToolPath(path string) bool {
 	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
-	if len(parts) == 0 {
+	if len(parts) >= 2 && parts[0] == "input" {
+		if _, err := strconv.Atoi(parts[1]); err != nil {
+			return false
+		}
+		parts = parts[2:]
+	}
+	if len(parts) == 0 || len(parts)%2 != 0 {
 		return false
 	}
-	switch parts[len(parts)-1] {
-	case "properties", "patternProperties", "$defs", "definitions", "dependentSchemas", "dependentRequired", "dependencies":
-		return true
-	default:
-		return false
+	for index := 0; index < len(parts); index += 2 {
+		if parts[index] != "tools" {
+			return false
+		}
+		if _, err := strconv.Atoi(parts[index+1]); err != nil {
+			return false
+		}
 	}
+	return true
 }
 
 func isMaskableText(path, key string) bool {
+	if isJSONSchemaPath(path) {
+		return key == "description" || key == "title"
+	}
+	if strings.HasPrefix(path, "/messages/") {
+		switch key {
+		case "content", "text", "arguments", "refusal":
+			return true
+		}
+	}
+	if parts := strings.Split(strings.TrimPrefix(path, "/"), "/"); len(parts) == 3 && parts[0] == "functions" && key == "description" {
+		return true
+	}
+	if path == "/response_format/json_schema/description" {
+		return true
+	}
 	if path == "/instructions" || path == "/input" {
 		return true
 	}
 	if strings.HasPrefix(path, "/input/") {
 		switch key {
-		case "text", "content", "output", "arguments":
+		case "text", "content", "output", "arguments", "input":
 			return true
 		}
 	}
-	if strings.HasPrefix(path, "/tools/") && key == "description" {
+	if key == "description" && isResponsesToolPath(strings.TrimSuffix(path, "/description")) {
 		return true
 	}
 	if path == "/text/format/description" {
@@ -177,22 +230,86 @@ func isMaskableText(path, key string) bool {
 	if strings.HasPrefix(path, "/prompt/variables/") {
 		return true
 	}
-	return isJSONSchemaPath(path) && (key == "description" || key == "title")
+	return false
 }
 
 func unsupportedType(value string) bool {
 	lower := strings.ToLower(value)
-	return strings.Contains(lower, "image") || strings.Contains(lower, "audio") ||
-		strings.Contains(lower, "file") || lower == "computer_call_output"
+	if lower == "computer_call_output" {
+		return true
+	}
+	// 按类型片段识别附件，避免把 profile 等普通类型误判为 file。
+	for _, part := range strings.FieldsFunc(lower, func(r rune) bool { return r == '_' || r == '-' || r == '.' || r == '/' }) {
+		if part == "image" || part == "audio" || part == "file" {
+			return true
+		}
+	}
+	return false
 }
 
-func containsTextOrStructure(value any) bool {
-	switch value.(type) {
-	case string, map[string]any, []any:
+// 扩展对象里的同名 text/content 不能继承正文的可替换权限。
+func knownTextContainer(root any, path string) bool {
+	if isJSONSchemaPath(path) {
 		return true
-	default:
+	}
+	if key := path[strings.LastIndex(path, "/")+1:]; key == "description" && isResponsesToolPath(strings.TrimSuffix(path, "/description")) {
+		return true
+	}
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	if len(parts) < 3 || (parts[0] != "input" && parts[0] != "messages") {
+		return true
+	}
+	parentPath := path[:strings.LastIndex(path, "/")]
+	parent, err := resolvePointer(root, parentPath, false, "")
+	if err != nil {
 		return false
 	}
+	object, ok := parent.(map[string]any)
+	if !ok {
+		return false
+	}
+	typeName, _ := object["type"].(string)
+	key := parts[len(parts)-1]
+	if parts[0] == "input" {
+		if len(parts) == 3 {
+			switch key {
+			case "content":
+				return typeName == "message" || typeName == ""
+			case "output":
+				return typeName == "function_call_output" || typeName == "custom_tool_call_output"
+			case "arguments":
+				return typeName == "function_call"
+			case "input":
+				return typeName == "custom_tool_call"
+			}
+		}
+		if len(parts) == 5 && key == "text" && (parts[2] == "content" || parts[2] == "output" || parts[2] == "summary") {
+			item, err := resolvePointer(root, "/input/"+parts[1], false, "")
+			if err != nil {
+				return false
+			}
+			itemType, _ := item.(map[string]any)["type"].(string)
+			switch itemType {
+			case "", "message", "function_call_output", "custom_tool_call_output", "reasoning":
+				return typeName == "input_text" || typeName == "output_text" || typeName == "reasoning_text" || typeName == "summary_text" || typeName == "text"
+			}
+		}
+		return false
+	}
+	if len(parts) == 3 {
+		return key == "content" || key == "refusal"
+	}
+	if len(parts) == 5 && parts[2] == "content" && key == "text" {
+		return typeName == "text"
+	}
+	if key == "arguments" && len(parts) == 4 && parts[2] == "function_call" {
+		return true
+	}
+	if key == "arguments" && len(parts) == 6 && parts[2] == "tool_calls" && parts[4] == "function" {
+		call, err := resolvePointer(root, "/messages/"+parts[1]+"/tool_calls/"+parts[3], false, "")
+		return err == nil && call.(map[string]any)["type"] == "function"
+	}
+	return false
 }
 
 func escapePointer(value string) string {

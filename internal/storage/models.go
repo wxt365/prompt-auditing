@@ -7,6 +7,7 @@ type Mapping struct {
 
 type Rule struct {
 	ID            string    `json:"id"`
+	Name          string    `json:"name"`
 	Type          string    `json:"type"`
 	Action        string    `json:"action"`
 	Enabled       bool      `json:"enabled"`
@@ -15,6 +16,13 @@ type Rule struct {
 	Replacement   string    `json:"replacement,omitempty"`
 	Keywords      []string  `json:"keywords,omitempty"`
 	Mappings      []Mapping `json:"mappings,omitempty"`
+}
+
+func (r Rule) DisplayName() string {
+	if r.Name != "" {
+		return r.Name
+	}
+	return r.ID
 }
 
 type RuleSet struct {

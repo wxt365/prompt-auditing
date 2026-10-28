@@ -45,7 +45,7 @@ func TestInitialRulesPositiveNegativeAndBoundarySamples(t *testing.T) {
 		{name: "密码赋值大小写正例", input: "PASSWORD = secret123", action: security.ActionBlock, matchCount: 1},
 		{name: "密码四字符边界", input: "pwd=abcd", action: security.ActionBlock, matchCount: 1},
 		{name: "密码三字符反例", input: "pwd=abc", action: security.ActionAllow},
-		{name: "RFC1918_边界正例", input: "10.0.0.0 10.255.255.255 172.16.0.0 172.31.255.255 192.168.0.0 192.168.255.255", action: security.ActionWarn, matchCount: 6},
+		{name: "RFC1918_默认关闭", input: "10.0.0.0 10.255.255.255 172.16.0.0 172.31.255.255 192.168.0.0 192.168.255.255", action: security.ActionAllow},
 		{name: "公网与非法_IP_反例", input: "8.8.8.8 172.15.255.255 172.32.0.0 999.1.2.3", action: security.ActionAllow},
 	}
 	for _, test := range tests {

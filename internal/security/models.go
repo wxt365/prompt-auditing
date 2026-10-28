@@ -19,16 +19,18 @@ type Payload struct {
 }
 
 type Match struct {
-	RuleID   string
-	Category string
-	Path     string
-	Start    int
-	End      int
-	Original string
-	Keyword  string
-	Target   string
-	Action   string
-	Maskable bool
+	RuleID      string
+	RuleName    string
+	Category    string
+	Path        string
+	Start       int
+	End         int
+	Original    string
+	Keyword     string
+	Target      string
+	Action      string
+	BlockReason string
+	Maskable    bool
 }
 
 type Decision struct {
