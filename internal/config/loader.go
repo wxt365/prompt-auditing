@@ -14,7 +14,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const defaultBodyLimit = 5 << 20
+// DefaultMaxBodyBytes 为官方图片请求及多图 multipart 封装预留空间，同时用于命令行配置和桌面版首次设置。
+const DefaultMaxBodyBytes = 1 << 30
 
 func Load(path string) (Config, error) {
 	absolutePath, err := filepath.Abs(path)
@@ -53,7 +54,7 @@ func applyDefaults(cfg *Config) {
 		cfg.Listen = "127.0.0.1:18080"
 	}
 	if cfg.MaxBodyBytes == 0 {
-		cfg.MaxBodyBytes = defaultBodyLimit
+		cfg.MaxBodyBytes = DefaultMaxBodyBytes
 	}
 	if cfg.MaxConcurrentRequests == 0 {
 		cfg.MaxConcurrentRequests = 10

@@ -107,7 +107,7 @@ func (l *RequestLog) begin(requestID, method, path string) *requestTrace {
 		return nil
 	}
 	// 未知路径不保留原文，避免将 URL 中误填的凭证写入调试日志。
-	if path != responsesPath && path != chatCompletionsPath && path != "/healthz" {
+	if !supportedRequestPath(path) && path != chatCompletionsAliasPath && path != "/healthz" {
 		path = "(不支持的路径)"
 	}
 	switch method {

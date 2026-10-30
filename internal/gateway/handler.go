@@ -28,6 +28,9 @@ import (
 
 const responsesPath = "/v1/responses"
 const chatCompletionsPath = "/v1/chat/completions"
+const chatCompletionsAliasPath = "/chat/completions"
+const imagesGenerationsPath = "/images/generations"
+const imagesEditsPath = "/images/edits"
 
 const redactedCredential = "[REDACTED_GATEWAY_CREDENTIAL]"
 
@@ -136,6 +139,12 @@ func (h *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	}
 	returned := false
 	defer func() { h.trace.finish(returned, request.Context().Err() != nil) }()
+	if request.URL.Path == chatCompletionsAliasPath {
+		// 别名在请求副本中归一化，共用校验和转发；日志保留客户端原始路径。
+		request = request.Clone(request.Context())
+		request.URL.Path = chatCompletionsPath
+		request.URL.RawPath = ""
+	}
 	h.serveRequest(writer, request, requestID, started)
 	returned = true
 }
@@ -157,7 +166,7 @@ func (h *Handler) serveRequest(writer http.ResponseWriter, request *http.Request
 		current.upstreamKey = current.localToken
 		h = &current
 	}
-	if (request.URL.Path != responsesPath && request.URL.Path != chatCompletionsPath) || request.URL.RawQuery != "" {
+	if !supportedRequestPath(request.URL.Path) || request.URL.RawQuery != "" {
 		h.recordSystemFailure(requestID, "gateway_route_not_supported", started)
 		h.reject(writer, http.StatusNotFound, "gateway_route_not_supported", "请求路径不受支持")
 		return
@@ -190,16 +199,26 @@ func (h *Handler) serveRequest(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	contentTypes := request.Header.Values("Content-Type")
-	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
-	if len(contentTypes) != 1 || err != nil || mediaType != "application/json" {
+	mediaType, mediaParams, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
+	if len(contentTypes) != 1 || err != nil || (mediaType != "application/json" && !(request.URL.Path == imagesEditsPath && mediaType == "multipart/form-data")) {
 		h.recordSystemFailure(requestID, "unsupported_media_type", started)
 		h.reject(writer, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type 不受支持")
 		return
 	}
 	var payload security.Payload
-	if request.URL.Path == chatCompletionsPath {
+	marshalPayload := security.Marshal
+	switch request.URL.Path {
+	case chatCompletionsPath:
 		payload, err = security.ExtractChatCompletions(decoded)
-	} else {
+	case imagesGenerationsPath:
+		payload, err = security.ExtractImageGeneration(decoded)
+	case imagesEditsPath:
+		if mediaType == "multipart/form-data" {
+			payload, marshalPayload, err = extractImageEditMultipart(decoded, mediaParams["boundary"])
+		} else {
+			payload, err = security.ExtractImageEdit(decoded)
+		}
+	default:
 		payload, err = security.Extract(decoded)
 	}
 	if err != nil {
@@ -265,7 +284,7 @@ func (h *Handler) serveRequest(writer http.ResponseWriter, request *http.Request
 			h.reject(writer, http.StatusServiceUnavailable, "security_engine_unavailable", "安全检测服务不可用")
 			return
 		}
-		masked, err := security.Marshal(payload)
+		masked, err := marshalPayload(payload)
 		if err != nil {
 			h.recordSystemFailure(requestID, "security_engine_unavailable", started)
 			h.reject(writer, http.StatusServiceUnavailable, "security_engine_unavailable", "安全检测服务不可用")
@@ -286,6 +305,14 @@ func (h *Handler) serveRequest(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	h.forward(writer, request, requestID, started, decision, forwardBody, bodyModified)
+}
+
+func supportedRequestPath(path string) bool {
+	switch path {
+	case responsesPath, chatCompletionsPath, imagesGenerationsPath, imagesEditsPath:
+		return true
+	}
+	return false
 }
 
 func isUpgradeRequest(request *http.Request) bool {

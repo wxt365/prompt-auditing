@@ -66,6 +66,9 @@ func TestClientAuthPreservesEachRequestsCredential(t *testing.T) {
 			body := fmt.Sprintf(`{"user":"key-%d","input":"内部系统"}`, index)
 			if index%2 != 0 {
 				path = chatCompletionsPath
+				if index%4 == 3 {
+					path = chatCompletionsAliasPath
+				}
 				body = fmt.Sprintf(`{"user":"key-%d","messages":[{"role":"user","content":"内部系统"}]}`, index)
 			}
 			r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))

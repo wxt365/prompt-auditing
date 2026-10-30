@@ -93,7 +93,7 @@ func Open(directory string) (*Store, error) {
 		if err == nil {
 			random := make([]byte, 32)
 			if _, err = rand.Read(random); err == nil {
-				err = store.Save(ctx, Values{SetupRequired: true, AuthMode: AuthClient, Listen: "127.0.0.1:18080", Upstream: "https://api.openai.com/v1", MaxBodyBytes: 5 << 20, MaxConcurrentRequests: 10, AuditRetentionDays: 30, AuditMaxBytes: 100 << 20}, hex.EncodeToString(random), "")
+				err = store.Save(ctx, Values{SetupRequired: true, AuthMode: AuthClient, Listen: "127.0.0.1:18080", Upstream: "https://api.openai.com/v1", MaxBodyBytes: config.DefaultMaxBodyBytes, MaxConcurrentRequests: 10, AuditRetentionDays: 30, AuditMaxBytes: 100 << 20}, hex.EncodeToString(random), "")
 			}
 		}
 		if err != nil {

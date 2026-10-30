@@ -1,6 +1,10 @@
 # Codex Security Gateway
 
-本地 Prompt 安全审计代理，同时处理 `POST /v1/responses` 和 `POST /v1/chat/completions`，支持文本请求、普通 JSON 和 SSE 流式响应。Responses 支持带图片及自定义工具历史的 Codex 会话：文本参与审计，图片原样转发，图片内容不做识别。Gateway 只监听回环地址，在请求发送到固定 HTTP 或 HTTPS 上游前执行阻断、告警和非级联脱敏，并将规则与审计分别保存到 `policy.db` 和 `audit.db`。
+本地 Prompt 安全审计代理，同时处理 `POST /v1/responses` 和 `POST /v1/chat/completions`，支持文本请求、普通 JSON 和 SSE 流式响应。Chat Completions 也接受不带版本前缀的 `POST /chat/completions`，两种路径使用相同检测与审计流程，按配置的上游地址拼接标准接口路径，不重复添加 `/v1`。Responses 支持带图片及自定义工具历史的 Codex 会话：文本参与审计，图片原样转发，图片内容不做识别。Gateway 只监听回环地址，在请求发送到固定 HTTP 或 HTTPS 上游前执行阻断、告警和非级联脱敏，并将规则与审计分别保存到 `policy.db` 和 `audit.db`。
+
+图片接口使用不带版本前缀的 `POST /images/generations` 和 `POST /images/edits`。生成接受 JSON，编辑接受 JSON 图片引用或 multipart 文件上传；提示词参与检测与脱敏，图片内容不做识别。请求示例、上游路径拼接及审计边界见 [图片接口使用说明](docs/image-endpoints.md)。`/alpha/search` 暂不支持。
+
+当前源码新安装默认请求体上限为 **1 GiB（1024 MiB，1073741824 字节）**，为官方图片请求和多图上传预留空间，可按上游需要继续调大；gzip 压缩与解压后的大小均受限，超限返回 413。升级保留已保存的限制；已有桌面版若仍为 5 或 100 MiB，请在“连接设置 → 请求限制与审计保留”改为 1024 并保存应用。CLI 修改 `max_body_bytes: 1073741824` 后重启。模型、图片尺寸等业务限制由上游判断；此调整不增加 PDF 或其他未支持附件的处理能力。已发布的 `0.1.3` 包仍默认 100 MiB。
 
 ## Windows 桌面使用
 
@@ -30,7 +34,7 @@
 
 macOS 版采用顶部菜单栏图标和同一套浏览器管理页，双击 `.app` 启动，关闭页面后继续代理，从菜单栏退出。凭证由登录钥匙串中的密钥加密保护，数据保存在当前用户的 `~/Library/Application Support/CodexSecurityGateway`。支持 HTTP/HTTPS 上游和两种请求协议。
 
-在 Mac 上执行 `bash scripts/build-macos-package.sh 0.1.0 arm64` 生成 Apple Silicon 桌面包；Intel 使用 `amd64`。桌面包构建需要 CGO 和 Xcode Command Line Tools，默认临时签名，未经过 Apple 公证。安装、配置及验证边界见 [macOS 使用说明](docs/macos-desktop.md)。
+在 Mac 上执行 `bash scripts/build-macos-package.sh 0.1.3 arm64` 生成 Apple Silicon 桌面包；Intel 使用 `amd64`。桌面包构建需要 CGO 和 Xcode Command Line Tools，默认临时签名，未经过 Apple 公证。安装、配置及验证边界见 [macOS 使用说明](docs/macos-desktop.md)。
 
 调试期间可让日常 Codex 保持直连，运行 `python -X utf8 scripts/test-codex-gateway.py` 在独立进程中临时走网关；支持图片和旧会话临时副本，不需要反复修改配置或重启。详见 [本机独立测试](docs/local-gateway-testing.md)。
 

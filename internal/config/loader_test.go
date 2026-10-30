@@ -1,10 +1,45 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestBodyLimitDefaultsAndExplicitValues(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		value int64
+		want  int64
+	}{
+		{"默认1GiB", 0, 1073741824},
+		{"保留原5MiB设置", 5 << 20, 5 << 20},
+		{"保留自定义20MiB", 20 << 20, 20 << 20},
+		{"保留原100MiB设置", 100 << 20, 100 << 20},
+		{"允许自定义2GiB", 2 << 30, 2 << 30},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			directory := t.TempDir()
+			path := filepath.Join(directory, "gateway.yaml")
+			body := "version: 1\nupstream: https://example.invalid/v1\npolicy_db: policy.db\naudit_db: audit.db\n"
+			if test.value != 0 {
+				body += fmt.Sprintf("max_body_bytes: %d\n", test.value)
+			}
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := Load(path)
+			if err != nil || loaded.MaxBodyBytes != test.want {
+				t.Fatalf("YAML 限额=%d，期望 %d，错误=%v", loaded.MaxBodyBytes, test.want, err)
+			}
+			prepared, err := Prepare(Config{Version: 1, Upstream: "https://example.invalid/v1", PolicyDB: "policy.db", AuditDB: "audit.db", MaxBodyBytes: test.value}, directory)
+			if err != nil || prepared.MaxBodyBytes != test.want {
+				t.Fatalf("桌面配置限额=%d，期望 %d，错误=%v", prepared.MaxBodyBytes, test.want, err)
+			}
+		})
+	}
+}
 
 func TestLoadResolvesDatabasePathsFromConfigDirectory(t *testing.T) {
 	directory := t.TempDir()

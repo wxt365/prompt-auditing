@@ -16,6 +16,30 @@
 4. 点击“保存并应用”，然后将客户端 API 基础地址改为页面显示的地址，通常为 `http://127.0.0.1:18080/v1`，保留客户端原认证。
 5. 如需网关保存上游 Key，选择“由网关配置上游 API Key”，保存后点击“复制本地令牌”，将此令牌用于客户端认证。
 
+自 `0.1.1` 起，Chat Completions 同时接受 `POST /chat/completions` 和 `POST /v1/chat/completions`。两种路径执行相同检测、脱敏及审计，并按同一上游配置转发，不重复拼接 `/v1`；Responses 仍使用 `POST /v1/responses`。
+
+自 `0.1.2` 起，新增 `POST /images/generations`（JSON）和 `POST /images/edits`（JSON 或 multipart）。这两个本地入口不加 `/v1`，例如直接请求 `http://127.0.0.1:18080/images/generations`；图片客户端若自动附加 `/images/...`，其 Base URL 应设为 `http://127.0.0.1:18080`。上游仍可配置为 `http://192.168.137.250:33000/v1/`，转发路径为 `/v1/images/...`。`/alpha/search` 暂不支持。
+
+图片生成示例（`GATEWAY_BEARER` 使用客户端原密钥；网关持钥模式则使用本地令牌）：
+
+```bash
+curl http://127.0.0.1:18080/images/generations \
+  -H "Authorization: Bearer $GATEWAY_BEARER" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-image-1","prompt":"画一只白猫"}'
+```
+
+图片编辑示例：
+
+```bash
+curl http://127.0.0.1:18080/images/edits \
+  -H "Authorization: Bearer $GATEWAY_BEARER" \
+  -F 'model=gpt-image-1' -F 'prompt=将背景改为蓝色' \
+  -F 'image[]=@input.png'
+```
+
+模型需由你的上游支持；Gateway 不修改模型名。图片本身、远程 URL 和文件 ID 指向的内容不做 OCR 或敏感内容检测；只有提示词可脱敏，其他字段与文件名仍检测，无法安全替换时阻断。multipart 阻断审计以 JSON 保存文本、文件名、字段头、大小和 SHA-256，不保存图片二进制。当前源码新安装默认请求体限额为 1 GiB（1024 MiB），允许继续调大；multipart 开销和 Base64 膨胀也计入限额，gzip 压缩与解压后分别受限，超限返回 413。升级保留已有设置；若仍为 5 或 100 MiB，请在“连接设置 → 请求限制与审计保留 → 最大请求体（MiB）”改为 1024，点击“保存并应用”。已发布的 `0.1.3` 包仍默认 100 MiB，需重新构建才能使用新默认值及界面。限额提高不代表支持 PDF 附件。
+
 “检查上游连接”只发送不带认证的 `HEAD <上游地址>/models`，最多等待 5 秒；收到 401、404 或其他 HTTP 状态只代表网络与 HTTP 可达，不代表模型调用成功。
 
 ## 规则、日志与退出
@@ -39,11 +63,11 @@
 需要 Go 1.26.5 和 Xcode Command Line Tools；运行程序无需安装 Go、Python 或 Node.js。
 
 ```bash
-bash scripts/build-macos-package.sh 0.1.0 arm64
+bash scripts/build-macos-package.sh 0.1.3 arm64
 # Intel 构建：将 arm64 改为 amd64
 ```
 
-产物在 `dist/codex-gateway-macos-arm64-0.1.0/` 和同名 ZIP 中，包含 `.app`、本说明和 SHA-256 文件。构建拒绝覆盖已有同版本产物。
+产物在 `dist/codex-gateway-macos-arm64-0.1.3/` 和同名 ZIP 中，包含 `.app`、本说明和 SHA-256 文件。构建拒绝覆盖已有同版本产物。
 
 桌面版使用 CGO 调用系统 AppKit 和 Security 框架；原有 `scripts/build-release.sh` 仍生成无 CGO 的 CLI 以及 Windows 桌面版，不包含 macOS `.app`。
 

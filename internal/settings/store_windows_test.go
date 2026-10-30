@@ -26,11 +26,15 @@ func TestDesktopSettingsPersistAndEncryptSecrets(t *testing.T) {
 	if values.Listen != "127.0.0.1:18080" {
 		t.Fatalf("新安装默认监听地址错误: %s", values.Listen)
 	}
+	if values.MaxBodyBytes != 1073741824 {
+		t.Fatalf("新安装默认请求限额错误: %d", values.MaxBodyBytes)
+	}
 	if !values.SetupRequired {
 		t.Fatal("新安装必须先配置上游")
 	}
 	values.SetupRequired = false
 	values.Listen = "127.0.0.1:8080"
+	values.MaxBodyBytes = 5 << 20
 	values.Upstream = "https://example.invalid/v1"
 	values.AuthMode = AuthGateway
 	const upstreamKey = "settings-test-private-upstream-key"
@@ -61,7 +65,7 @@ func TestDesktopSettingsPersistAndEncryptSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.SetupRequired || loaded.Upstream != values.Upstream || loaded.Listen != values.Listen || loadedToken != token || loadedKey != upstreamKey {
+	if loaded.SetupRequired || loaded.Upstream != values.Upstream || loaded.Listen != values.Listen || loaded.MaxBodyBytes != values.MaxBodyBytes || loadedToken != token || loadedKey != upstreamKey {
 		t.Fatal("配置或加密凭证未正确恢复")
 	}
 	if _, err := reopened.db.ExecContext(context.Background(), "UPDATE settings SET value=json_remove(value, '$.setup_required')"); err != nil {

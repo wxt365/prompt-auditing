@@ -23,13 +23,22 @@ func Extract(body []byte) (Payload, error) {
 }
 
 func extractPayload(body []byte, validate func(map[string]any) error) (Payload, error) {
+	return extractPayloadWithOptions(body, validate, extractionOptions{})
+}
+
+type extractionOptions struct {
+	images    bool
+	imageEdit bool
+}
+
+func extractPayloadWithOptions(body []byte, validate func(map[string]any) error, options extractionOptions) (Payload, error) {
 	if !utf8.Valid(body) {
 		return Payload{}, errors.New("请求体包含非法 UTF-8")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.UseNumber()
 	texts := make([]Text, 0)
-	root, err := decodeValue(decoder, "", "", 0, &texts)
+	root, err := decodeValue(decoder, "", "", 0, &texts, options)
 	if err != nil {
 		return Payload{}, fmt.Errorf("JSON 无法解析或不受支持: %w", err)
 	}
@@ -46,14 +55,14 @@ func extractPayload(body []byte, validate func(map[string]any) error) (Payload, 
 		return Payload{}, fmt.Errorf("请求体结构无效: %w", err)
 	}
 	for index := range texts {
-		if texts[index].Maskable && !knownTextContainer(root, texts[index].Path) {
+		if !options.images && texts[index].Maskable && !knownTextContainer(root, texts[index].Path) {
 			texts[index].Maskable = false
 		}
 	}
 	return Payload{Root: root, Texts: texts}, nil
 }
 
-func decodeValue(decoder *json.Decoder, path, key string, depth int, texts *[]Text) (any, error) {
+func decodeValue(decoder *json.Decoder, path, key string, depth int, texts *[]Text, options extractionOptions) (any, error) {
 	if depth > maxJSONDepth {
 		return nil, fmt.Errorf("JSON 嵌套超过 %d 层", maxJSONDepth)
 	}
@@ -64,7 +73,18 @@ func decodeValue(decoder *json.Decoder, path, key string, depth int, texts *[]Te
 	delimiter, isDelimiter := token.(json.Delim)
 	if !isDelimiter {
 		if value, ok := token.(string); ok {
-			*texts = append(*texts, Text{Path: path, Value: value, Maskable: isMaskableText(path, key)})
+			maskable := isMaskableText(path, key)
+			if options.images {
+				maskable = path == "/prompt"
+			}
+			if options.imageEdit && key == "image_url" && isImageReferencePath(strings.TrimSuffix(path, "/image_url")) && strings.HasPrefix(value, "data:") {
+				// 仅登记的图片引用可豁免二进制；对象结构仍在后续完整校验。
+				if err := validateImageURL(value, path); err != nil {
+					return nil, err
+				}
+			} else {
+				*texts = append(*texts, Text{Path: path, Value: value, Maskable: maskable})
+			}
 		}
 		return token, nil
 	}
@@ -85,13 +105,14 @@ func decodeValue(decoder *json.Decoder, path, key string, depth int, texts *[]Te
 				return nil, fmt.Errorf("JSON 对象包含重复键: %s", childKey)
 			}
 			seen[childKey] = struct{}{}
-			if unsupportedKeys[childKey] && !isJSONSchemaPath(path) && !(childKey == "image_url" && isImageContentPath(path)) {
+			imageReference := options.imageEdit && isImageReferencePath(path) && (childKey == "image_url" || childKey == "file_id")
+			if unsupportedKeys[childKey] && !isJSONSchemaPath(path) && !(!options.images && childKey == "image_url" && isImageContentPath(path)) && !imageReference {
 				return nil, fmt.Errorf("不支持的附件字段: %s", childKey)
 			}
 			childPath := path + "/" + escapePointer(childKey)
 			// 扩展字段名也可能携带业务内容；键名只检查，不做替换。
 			*texts = append(*texts, Text{Path: childPath, Value: childKey})
-			child, err := decodeValue(decoder, childPath, childKey, depth+1, texts)
+			child, err := decodeValue(decoder, childPath, childKey, depth+1, texts, options)
 			if err != nil {
 				return nil, err
 			}
@@ -100,10 +121,10 @@ func decodeValue(decoder *json.Decoder, path, key string, depth int, texts *[]Te
 		if _, err := decoder.Token(); err != nil {
 			return nil, err
 		}
-		if rawType, ok := object["type"].(string); ok && unsupportedType(rawType) && !(rawType == "input_image" && isImageContentPath(path)) {
+		if rawType, ok := object["type"].(string); ok && unsupportedType(rawType) && !(!options.images && rawType == "input_image" && isImageContentPath(path)) {
 			return nil, fmt.Errorf("不支持的附件或二进制内容类型: %s", rawType)
 		}
-		if image, exists := object["image_url"]; exists && isImageContentPath(path) {
+		if image, exists := object["image_url"]; exists && !options.images && isImageContentPath(path) {
 			if object["type"] != "input_image" {
 				return nil, fmt.Errorf("%s/image_url 必须属于 input_image 内容", path)
 			}
@@ -124,7 +145,7 @@ func decodeValue(decoder *json.Decoder, path, key string, depth int, texts *[]Te
 	case '[':
 		array := make([]any, 0)
 		for index := 0; decoder.More(); index++ {
-			child, err := decodeValue(decoder, fmt.Sprintf("%s/%d", path, index), key, depth+1, texts)
+			child, err := decodeValue(decoder, fmt.Sprintf("%s/%d", path, index), key, depth+1, texts, options)
 			if err != nil {
 				return nil, err
 			}
