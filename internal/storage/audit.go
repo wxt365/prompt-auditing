@@ -110,11 +110,12 @@ func (store *AuditStore) WriteEvent(ctx context.Context, event audit.Event) erro
 	}
 	result, err := tx.ExecContext(ctx, `INSERT INTO audit_events
 		(request_id, event_type, occurred_at, user_name, rule_set_version, action, result,
-		 match_count, request_body_json, request_hmac_sha256, upstream_status, duration_ms, error_code)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''))`,
+		 match_count, request_body_json, request_hmac_sha256, upstream_status, duration_ms, error_code,
+		 request_method, request_path, http_status)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), ?, ?, ?)`,
 		event.RequestID, event.EventType, event.OccurredAt, event.User, event.RuleSetVersion,
 		event.Action, event.Result, event.MatchCount, requestBody, event.RequestHMAC,
-		event.UpstreamStatus, event.DurationMS, event.ErrorCode,
+		event.UpstreamStatus, event.DurationMS, event.ErrorCode, event.RequestMethod, event.RequestPath, event.HTTPStatus,
 	)
 	if err != nil {
 		return fmt.Errorf("写入审计事件: %w", err)

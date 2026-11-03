@@ -253,7 +253,7 @@ func TestRequestLogCapturesRejectionsAndUpstreamFailures(t *testing.T) {
 	}
 }
 
-func TestRequestLogRedactsClientCredentialsAndDoesNotStoreUnknownURLs(t *testing.T) {
+func TestRequestLogRedactsClientCredentialsInUnknownPaths(t *testing.T) {
 	logs := &RequestLog{}
 	logs.SetEnabled(true)
 	handler := newClientAuthHandler(t, "http://127.0.0.1:1", &memoryAuditor{failAfter: -1}, nil)
@@ -267,7 +267,7 @@ func TestRequestLogRedactsClientCredentialsAndDoesNotStoreUnknownURLs(t *testing
 	}
 	snapshot := logs.Snapshot()
 	serialized, _ := json.Marshal(snapshot)
-	if strings.Contains(string(serialized), secret) || snapshot.Items[0].Path != "(不支持的路径)" || !strings.Contains(snapshot.Items[1].Detail, redactedCredential) {
+	if strings.Contains(string(serialized), secret) || snapshot.Items[0].Path != "/"+redactedCredential || !strings.Contains(snapshot.Items[1].Detail, redactedCredential) {
 		t.Fatalf("客户端密钥或 URL 未正确脱敏: %s", serialized)
 	}
 }

@@ -45,6 +45,9 @@ type AuditRecord struct {
 	UpstreamStatus *int       `json:"upstream_status"`
 	DurationMS     int64      `json:"duration_ms"`
 	ErrorCode      string     `json:"error_code"`
+	RequestMethod  string     `json:"request_method"`
+	RequestPath    string     `json:"request_path"`
+	HTTPStatus     int        `json:"http_status"`
 	Matches        []AuditHit `json:"matches,omitempty"`
 }
 
@@ -108,7 +111,8 @@ func openAuditReader(ctx context.Context, path string) (*sql.DB, error) {
 
 const auditRequestSelect = `SELECT e.id, e.request_id, e.occurred_at, e.event_type, e.user_name,
 	e.rule_set_version, e.action, COALESCE(c.result, e.result), e.match_count,
-	c.upstream_status, COALESCE(c.duration_ms, e.duration_ms), COALESCE(c.error_code, e.error_code, '')
+	c.upstream_status, COALESCE(c.duration_ms, e.duration_ms), COALESCE(c.error_code, e.error_code, ''),
+	e.request_method, e.request_path, e.http_status
 	FROM audit_events e LEFT JOIN audit_events c ON c.id = (
 		SELECT id FROM audit_events WHERE request_id = e.request_id AND event_type = 'completion' ORDER BY id DESC LIMIT 1
 	) `
@@ -117,7 +121,8 @@ func scanAuditRecord(row interface{ Scan(...any) error }) (AuditRecord, error) {
 	var record AuditRecord
 	err := row.Scan(&record.ID, &record.RequestID, &record.OccurredAt, &record.EventType, &record.User,
 		&record.RuleSetVersion, &record.Action, &record.Result, &record.MatchCount,
-		&record.UpstreamStatus, &record.DurationMS, &record.ErrorCode)
+		&record.UpstreamStatus, &record.DurationMS, &record.ErrorCode,
+		&record.RequestMethod, &record.RequestPath, &record.HTTPStatus)
 	return record, err
 }
 

@@ -44,14 +44,14 @@ func imageRequest(handler http.Handler, path, contentType string, body []byte, t
 func TestImageJSONGatewayRoutesAuthMaskAndStreaming(t *testing.T) {
 	for _, clientAuth := range []bool{false, true} {
 		for _, base := range []string{"", "/v1", "/v1/", "/proxy/v1/", "/proxy/"} {
-			for _, path := range []string{imagesGenerationsPath, imagesEditsPath} {
+			for _, path := range []string{imagesGenerationsPath, imagesEditsPath, imagesGenerationsAliasPath, imagesEditsAliasPath} {
 				t.Run(fmt.Sprintf("%t%s%s", clientAuth, base, path), func(t *testing.T) {
 					var calls atomic.Int32
 					const sse = "event: image_generation.completed\ndata: {\"b64_json\":\"abc\"}\n\n"
 					const normal = `{"data":[{"b64_json":"abc"}]}`
 					upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 						calls.Add(1)
-						if r.URL.Path != strings.TrimRight(base, "/")+path {
+						if r.URL.Path != strings.TrimRight(base, "/")+strings.TrimPrefix(path, "/v1") {
 							t.Errorf("上游路径=%s", r.URL.Path)
 						}
 						body, _ := io.ReadAll(r.Body)
@@ -85,7 +85,7 @@ func TestImageJSONGatewayRoutesAuthMaskAndStreaming(t *testing.T) {
 					handler.requestLog = &RequestLog{}
 					handler.requestLog.SetEnabled(true)
 					suffix := ""
-					if path == imagesEditsPath {
+					if path == imagesEditsPath || path == imagesEditsAliasPath {
 						suffix = `,"images":[{"file_id":"file-1"}]`
 					}
 					for _, blocked := range []string{
@@ -162,96 +162,101 @@ func imageMultipart(t *testing.T, parts ...testImagePart) ([]byte, string) {
 }
 
 func TestImageMultipartMaskPreservesFilesAndIntegrity(t *testing.T) {
-	for _, mask := range []bool{false, true} {
-		for _, encoding := range []string{"", "gzip"} {
-			t.Run(fmt.Sprintf("mask=%t/%s", mask, encoding), func(t *testing.T) {
-				image := []byte("\x89PNG\r\n\x1a\n客户A\x00\xff")
-				prompt := "ordinary prompt"
-				if mask {
-					prompt = "内部系统A"
-				}
-				body, contentType := imageMultipart(t,
-					testImagePart{name: "model", data: []byte("gpt-test")},
-					testImagePart{name: "prompt", data: []byte(prompt), header: textproto.MIMEHeader{"Content-Length": {fmt.Sprint(len(prompt))}, "Digest": {"old-part-digest"}}},
-					testImagePart{name: "stream", data: []byte("true")},
-					testImagePart{name: "image[]", filename: "original.png", data: image},
-					testImagePart{name: "image[]", filename: "second.png", data: image},
-					testImagePart{name: "mask", filename: "mask.png", data: image},
-				)
-				wireBody := body
-				if encoding == "gzip" {
-					wireBody = gzipBody(t, body)
-				}
-				var calls atomic.Int32
-				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					calls.Add(1)
-					wire, _ := io.ReadAll(r.Body)
-					if !mask && !bytes.Equal(wire, wireBody) {
-						t.Error("未修改请求必须保留原始字节")
+	for _, path := range []string{imagesEditsPath, imagesEditsAliasPath} {
+		for _, mask := range []bool{false, true} {
+			for _, encoding := range []string{"", "gzip"} {
+				t.Run(fmt.Sprintf("%s/mask=%t/%s", path, mask, encoding), func(t *testing.T) {
+					image := []byte("\x89PNG\r\n\x1a\n客户A\x00\xff")
+					prompt := "ordinary prompt"
+					if mask {
+						prompt = "内部系统A"
 					}
-					if r.Header.Get("Content-Type") != contentType || r.Header.Get("Content-Encoding") != encoding || r.ContentLength != int64(len(wire)) {
-						t.Error("重编码后的 Header 错误")
-					}
-					for _, name := range []string{"Content-MD5", "Digest", "Etag", "Content-Digest", "Repr-Digest"} {
-						if mask && r.Header.Get(name) != "" {
-							t.Errorf("残留完整性 Header: %s", name)
-						}
-					}
-					decoded := wire
+					body, contentType := imageMultipart(t,
+						testImagePart{name: "model", data: []byte("gpt-test")},
+						testImagePart{name: "prompt", data: []byte(prompt), header: textproto.MIMEHeader{"Content-Length": {fmt.Sprint(len(prompt))}, "Digest": {"old-part-digest"}}},
+						testImagePart{name: "stream", data: []byte("true")},
+						testImagePart{name: "image[]", filename: "original.png", data: image},
+						testImagePart{name: "image[]", filename: "second.png", data: image},
+						testImagePart{name: "mask", filename: "mask.png", data: image},
+					)
+					wireBody := body
 					if encoding == "gzip" {
-						reader, err := gzip.NewReader(bytes.NewReader(wire))
-						if err != nil {
-							t.Error(err)
-							return
-						}
-						decoded, _ = io.ReadAll(reader)
-						_ = reader.Close()
+						wireBody = gzipBody(t, body)
 					}
-					reader := multipart.NewReader(bytes.NewReader(decoded), "gateway-test-boundary")
-					count := 0
-					for {
-						part, err := reader.NextRawPart()
-						if err == io.EOF {
-							break
+					var calls atomic.Int32
+					upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						calls.Add(1)
+						if r.URL.Path != "/v1/images/edits" {
+							t.Errorf("图片编辑上游路径错误: %s", r.URL.Path)
 						}
-						if err != nil {
-							t.Error(err)
-							break
+						wire, _ := io.ReadAll(r.Body)
+						if !mask && !bytes.Equal(wire, wireBody) {
+							t.Error("未修改请求必须保留原始字节")
 						}
-						data, _ := io.ReadAll(part)
-						count++
-						if part.FileName() != "" && !bytes.Equal(data, image) {
-							t.Error("图片字节被修改")
+						if r.Header.Get("Content-Type") != contentType || r.Header.Get("Content-Encoding") != encoding || r.ContentLength != int64(len(wire)) {
+							t.Error("重编码后的 Header 错误")
 						}
-						if part.FormName() == "prompt" {
-							expected := prompt
-							if mask {
-								expected = "业务系统"
-							}
-							if string(data) != expected {
-								t.Errorf("提示词=%q", data)
-							}
-							if mask && (part.Header.Get("Content-Length") != "" || part.Header.Get("Digest") != "") {
-								t.Error("脱敏文本残留失效的字段级长度或摘要")
-							}
-							if !mask && part.Header.Get("Digest") != "old-part-digest" {
-								t.Error("未修改字段丢失原摘要")
+						for _, name := range []string{"Content-MD5", "Digest", "Etag", "Content-Digest", "Repr-Digest"} {
+							if mask && r.Header.Get(name) != "" {
+								t.Errorf("残留完整性 Header: %s", name)
 							}
 						}
+						decoded := wire
+						if encoding == "gzip" {
+							reader, err := gzip.NewReader(bytes.NewReader(wire))
+							if err != nil {
+								t.Error(err)
+								return
+							}
+							decoded, _ = io.ReadAll(reader)
+							_ = reader.Close()
+						}
+						reader := multipart.NewReader(bytes.NewReader(decoded), "gateway-test-boundary")
+						count := 0
+						for {
+							part, err := reader.NextRawPart()
+							if err == io.EOF {
+								break
+							}
+							if err != nil {
+								t.Error(err)
+								break
+							}
+							data, _ := io.ReadAll(part)
+							count++
+							if part.FileName() != "" && !bytes.Equal(data, image) {
+								t.Error("图片字节被修改")
+							}
+							if part.FormName() == "prompt" {
+								expected := prompt
+								if mask {
+									expected = "业务系统"
+								}
+								if string(data) != expected {
+									t.Errorf("提示词=%q", data)
+								}
+								if mask && (part.Header.Get("Content-Length") != "" || part.Header.Get("Digest") != "") {
+									t.Error("脱敏文本残留失效的字段级长度或摘要")
+								}
+								if !mask && part.Header.Get("Digest") != "old-part-digest" {
+									t.Error("未修改字段丢失原摘要")
+								}
+							}
+						}
+						if count != 6 {
+							t.Errorf("multipart 字段数量=%d", count)
+						}
+						w.Header().Set("Content-Type", "text/event-stream")
+						_, _ = io.WriteString(w, "event: image_edit.completed\ndata: {}\n\n")
+					}))
+					defer upstream.Close()
+					handler := newTestHandler(t, upstream.URL+"/v1/", &memoryAuditor{failAfter: -1}, imageRules)
+					response := imageRequest(handler, path, contentType, wireBody, testLocalToken, encoding)
+					if response.Code != http.StatusOK || calls.Load() != 1 || response.Body.String() != "event: image_edit.completed\ndata: {}\n\n" {
+						t.Fatalf("multipart 转发失败: %d %s", response.Code, response.Body.String())
 					}
-					if count != 6 {
-						t.Errorf("multipart 字段数量=%d", count)
-					}
-					w.Header().Set("Content-Type", "text/event-stream")
-					_, _ = io.WriteString(w, "event: image_edit.completed\ndata: {}\n\n")
-				}))
-				defer upstream.Close()
-				handler := newTestHandler(t, upstream.URL+"/v1/", &memoryAuditor{failAfter: -1}, imageRules)
-				response := imageRequest(handler, imagesEditsPath, contentType, wireBody, testLocalToken, encoding)
-				if response.Code != http.StatusOK || calls.Load() != 1 || response.Body.String() != "event: image_edit.completed\ndata: {}\n\n" {
-					t.Fatalf("multipart 转发失败: %d %s", response.Code, response.Body.String())
-				}
-			})
+				})
+			}
 		}
 	}
 }
@@ -419,12 +424,12 @@ func TestImageGatewayFailsClosed(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
 	defer upstream.Close()
 	handler := newTestHandler(t, upstream.URL, &memoryAuditor{failAfter: -1}, imageRules)
-	for _, path := range []string{"/v1/images/generations", "/v1/images/edits", "/alpha/search", imagesGenerationsPath + "?q=x"} {
+	for _, path := range []string{"/v2/images/generations", "/v1/images/edits/", "/alpha/search", imagesGenerationsPath + "?q=x", imagesGenerationsAliasPath + "?q=x"} {
 		if response := imageRequest(handler, path, "application/json", []byte(`{"prompt":"ok"}`), testLocalToken, ""); response.Code != 404 {
 			t.Fatalf("不应开放 %s: %d", path, response.Code)
 		}
 	}
-	for _, path := range []string{imagesGenerationsPath, imagesEditsPath} {
+	for _, path := range []string{imagesGenerationsPath, imagesEditsPath, imagesGenerationsAliasPath, imagesEditsAliasPath} {
 		if response := imageRequest(handler, path, "application/json", []byte(`{"prompt":"ok"}`), "", ""); response.Code != 401 {
 			t.Fatalf("缺少认证未拒绝: %d", response.Code)
 		}
@@ -462,15 +467,17 @@ func TestImageGatewayFailsClosed(t *testing.T) {
 	if response := imageRequest(injection, imagesEditsPath, contentType, body, testLocalToken, ""); response.Code != 503 {
 		t.Fatalf("替换分隔符注入未关闭: %d %s", response.Code, response.Body.String())
 	}
-	for _, blocked := range []bool{false, true} {
-		auditFailure := newTestHandler(t, upstream.URL, &memoryAuditor{failAfter: 0}, imageRules)
-		prompt := "内部系统A"
-		if blocked {
-			prompt = "客户A"
-		}
-		requestBody, formType := imageMultipart(t, testImagePart{name: "prompt", data: []byte(prompt)}, testImagePart{name: "image", filename: "i.png"})
-		if response := imageRequest(auditFailure, imagesEditsPath, formType, requestBody, testLocalToken, ""); response.Code != 503 {
-			t.Fatalf("审计故障未关闭: %d", response.Code)
+	for _, path := range []string{imagesEditsPath, imagesEditsAliasPath} {
+		for _, blocked := range []bool{false, true} {
+			auditFailure := newTestHandler(t, upstream.URL, &memoryAuditor{failAfter: 0}, imageRules)
+			prompt := "内部系统A"
+			if blocked {
+				prompt = "客户A"
+			}
+			requestBody, formType := imageMultipart(t, testImagePart{name: "prompt", data: []byte(prompt)}, testImagePart{name: "image", filename: "i.png"})
+			if response := imageRequest(auditFailure, path, formType, requestBody, testLocalToken, ""); response.Code != 503 {
+				t.Fatalf("审计故障未关闭: %d", response.Code)
+			}
 		}
 	}
 	for _, count := range []int{17, maxImageEditParts} {
@@ -489,5 +496,41 @@ func TestImageGatewayFailsClosed(t *testing.T) {
 	}
 	if calls.Load() != 0 {
 		t.Fatal("拒绝请求到达上游")
+	}
+}
+
+func TestImageAliasesKeepOriginalRequestAndRejectionDiagnostics(t *testing.T) {
+	for _, path := range []string{imagesGenerationsAliasPath, imagesEditsAliasPath} {
+		for _, test := range []struct {
+			method, suffix, token string
+			status                int
+		}{
+			{http.MethodPost, "", "", http.StatusUnauthorized},
+			{http.MethodGet, "", testLocalToken, http.StatusMethodNotAllowed},
+			{http.MethodPost, "?q=x", testLocalToken, http.StatusNotFound},
+		} {
+			t.Run(path+test.method+test.suffix+test.token, func(t *testing.T) {
+				auditor := &memoryAuditor{failAfter: -1}
+				handler := newTestHandler(t, "https://example.invalid/v1", auditor, imageRules)
+				handler.requestLog = &RequestLog{}
+				handler.requestLog.SetEnabled(true)
+				request := httptest.NewRequest(test.method, path+test.suffix, nil)
+				if test.token != "" {
+					request.Header.Set("Authorization", "Bearer "+test.token)
+				}
+				response := httptest.NewRecorder()
+				handler.ServeHTTP(response, request)
+				if response.Code != test.status || request.URL.RequestURI() != path+test.suffix {
+					t.Fatalf("拒绝状态或调用者请求被修改: status=%d request=%s", response.Code, request.URL.RequestURI())
+				}
+				if len(auditor.events) != 1 || auditor.events[0].RequestPath != path || auditor.events[0].RequestMethod != test.method || auditor.events[0].HTTPStatus != test.status {
+					t.Fatalf("别名拒绝审计未保留原路径: %+v", auditor.events)
+				}
+				items := handler.requestLog.Snapshot().Items
+				if len(items) != 1 || items[0].Path != path || !items[0].Finished {
+					t.Fatalf("别名实时日志未保留原路径: %+v", items)
+				}
+			})
+		}
 	}
 }

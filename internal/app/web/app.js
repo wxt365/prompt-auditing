@@ -248,7 +248,8 @@ async function loadAudits(before, query = auditQuery) {
     const request = cell(row, item.request_id, 'audit-request'); request.title = item.request_id;
     cell(row, labels[item.action] || item.action, item.action === 'block' ? 'danger' : '');
     const result = item.error_code ? `${auditResult(item)} · ${item.error_code}` : auditResult(item);
-    cell(row, result, item.error_code ? 'danger' : ''); cell(row, item.match_count);
+    const endpoint = item.request_path ? ` · ${item.request_method} ${item.request_path}${item.http_status ? ` · HTTP ${item.http_status}` : ''}` : '';
+    cell(row, result + endpoint, item.error_code ? 'danger' : ''); cell(row, item.match_count);
     const button = document.createElement('button'); button.type = 'button'; button.textContent = '查看详情';
     button.addEventListener('click', () => auditAction(() => showAuditDetail(item.id, button)));
     cell(row, '').append(button); tbody.append(row);
@@ -276,6 +277,8 @@ async function showAuditDetail(id, trigger) {
   const summary = $('audit-summary'); summary.replaceChildren();
   for (const [label,value] of [
     ['请求 ID',item.request_id],['发生时间',auditTime(item.occurred_at)],['用户',item.user],
+    ['请求方法',item.request_method || '未记录'],['接口路径',item.request_path || '未记录'],
+    ['本地状态码',item.http_status || '未记录'],
     ['处置动作',labels[item.action] || item.action],['处理结果',auditResult(item)],
     ['规则版本',item.rule_set_version],['命中次数',item.match_count],['上游状态码',item.upstream_status ?? '未收到上游响应'],
     ['处理耗时',`${item.duration_ms} ms`],['失败原因',auditErrors[item.error_code] || item.error_code || '无'],['错误代码',item.error_code || '无']

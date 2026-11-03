@@ -15,7 +15,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 3
+const schemaVersion = 4
 
 type databaseKind string
 
@@ -293,6 +293,15 @@ func verifySchema(ctx context.Context, db *sql.DB, kind databaseKind) error {
 		}
 	}
 	if kind == auditDatabase {
+		if current >= 4 {
+			rows, err := db.QueryContext(ctx, "SELECT request_method, request_path, http_status FROM audit_events LIMIT 0")
+			if err != nil {
+				return fmt.Errorf("请求诊断字段缺失: %w", err)
+			}
+			if err := rows.Close(); err != nil {
+				return err
+			}
+		}
 		if current >= 3 {
 			rows, err := db.QueryContext(ctx, "SELECT action, reason FROM audit_matches LIMIT 0")
 			if err != nil {
@@ -389,7 +398,7 @@ func migrateDatabase(ctx context.Context, db *sql.DB, kind databaseKind) error {
 	if current == schemaVersion {
 		return nil
 	}
-	if current != 0 && current != 1 && current != 2 {
+	if current < 0 || current > 3 {
 		return fmt.Errorf("不支持从数据库版本 %d 迁移", current)
 	}
 
@@ -420,11 +429,19 @@ func migrateDatabase(ctx context.Context, db *sql.DB, kind databaseKind) error {
 		}
 		statements = append(statements, "INSERT INTO schema_migrations(version, applied_at) VALUES(2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))")
 	}
-	if kind == auditDatabase {
-		statements = append(statements, "ALTER TABLE audit_matches ADD COLUMN action TEXT NOT NULL DEFAULT ''",
-			"ALTER TABLE audit_matches ADD COLUMN reason TEXT NOT NULL DEFAULT ''")
+	if current < 3 {
+		if kind == auditDatabase {
+			statements = append(statements, "ALTER TABLE audit_matches ADD COLUMN action TEXT NOT NULL DEFAULT ''",
+				"ALTER TABLE audit_matches ADD COLUMN reason TEXT NOT NULL DEFAULT ''")
+		}
+		statements = append(statements, "INSERT INTO schema_migrations(version, applied_at) VALUES(3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))")
 	}
-	statements = append(statements, "INSERT INTO schema_migrations(version, applied_at) VALUES(3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))")
+	if kind == auditDatabase {
+		statements = append(statements, "ALTER TABLE audit_events ADD COLUMN request_method TEXT NOT NULL DEFAULT ''",
+			"ALTER TABLE audit_events ADD COLUMN request_path TEXT NOT NULL DEFAULT ''",
+			"ALTER TABLE audit_events ADD COLUMN http_status INTEGER NOT NULL DEFAULT 0")
+	}
+	statements = append(statements, "INSERT INTO schema_migrations(version, applied_at) VALUES(4, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))")
 	for _, statement := range statements {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("执行迁移: %w", err)

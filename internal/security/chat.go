@@ -1,10 +1,14 @@
 package security
 
-import "fmt"
+import (
+	"fmt"
+	"strconv"
+	"strings"
+)
 
 // 两种接口独立校验已知字段，扩展 JSON 共用递归检测与原样转发。
 func ExtractChatCompletions(body []byte) (Payload, error) {
-	return extractPayload(body, validateChatStructure)
+	return extractPayloadWithOptions(body, validateChatStructure, extractionOptions{chat: true})
 }
 
 func validateChatStructure(root map[string]any) error {
@@ -84,7 +88,7 @@ func validateChatContent(value any, path string) error {
 	}
 	items, ok := value.([]any)
 	if !ok {
-		return fmt.Errorf("%s 必须是字符串或文本数组", path)
+		return fmt.Errorf("%s 必须是字符串或内容数组", path)
 	}
 	for index, item := range items {
 		itemPath := fmt.Sprintf("%s/%d", path, index)
@@ -96,8 +100,44 @@ func validateChatContent(value any, path string) error {
 		if object["type"] == "text" {
 			fields["text"] = scalar(isString)
 		}
+		if object["type"] == "image_url" {
+			if err := validateChatImagePart(object, itemPath); err != nil {
+				return err
+			}
+		}
 		if err := validateKnownFields(object, itemPath, fields); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func isChatImageContentPath(path string) bool {
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	if len(parts) != 4 || parts[0] != "messages" || parts[2] != "content" {
+		return false
+	}
+	_, messageErr := strconv.Atoi(parts[1])
+	_, contentErr := strconv.Atoi(parts[3])
+	return messageErr == nil && contentErr == nil
+}
+
+func validateChatImagePart(object map[string]any, path string) error {
+	if !isChatImageContentPath(path) || object["type"] != "image_url" {
+		return fmt.Errorf("%s/image_url 必须属于 Chat 图片内容", path)
+	}
+	image, ok := object["image_url"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("%s/image_url 必须是图片引用对象", path)
+	}
+	if err := validateImageURL(image["url"], path+"/image_url/url"); err != nil {
+		return err
+	}
+	if detail, exists := image["detail"]; exists {
+		switch detail {
+		case "auto", "low", "high", "original":
+		default:
+			return fmt.Errorf("%s/image_url/detail 图片精度无效", path)
 		}
 	}
 	return nil

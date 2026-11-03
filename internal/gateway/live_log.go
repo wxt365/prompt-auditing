@@ -106,15 +106,8 @@ func (l *RequestLog) begin(requestID, method, path string) *requestTrace {
 	if !l.enabled {
 		return nil
 	}
-	// 未知路径不保留原文，避免将 URL 中误填的凭证写入调试日志。
-	if !supportedRequestPath(path) && path != chatCompletionsAliasPath && path != "/healthz" {
-		path = "(不支持的路径)"
-	}
-	switch method {
-	case http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch, http.MethodHead, http.MethodOptions, http.MethodConnect, http.MethodTrace:
-	default:
-		method = "OTHER"
-	}
+	path = diagnosticPath(path)
+	method = diagnosticMethod(method)
 	l.sequence++
 	trace := &requestTrace{log: l, generation: l.generation, entry: RequestLogEntry{
 		ID: l.sequence, RequestID: requestID, ReceivedAt: time.Now(), Method: method, Path: path, Phase: "received",

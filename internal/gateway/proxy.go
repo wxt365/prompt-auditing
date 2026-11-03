@@ -37,7 +37,7 @@ func (h *Handler) forward(writer http.ResponseWriter, incoming *http.Request, re
 	target.RawPath = ""
 	target.RawQuery = ""
 	target.Fragment = ""
-	request, err := http.NewRequestWithContext(incoming.Context(), http.MethodPost, target.String(), bytes.NewReader(body))
+	request, err := http.NewRequestWithContext(incoming.Context(), incoming.Method, target.String(), bytes.NewReader(body))
 	if err != nil {
 		h.complete(requestID, started, decision, nil, "upstream_error", "upstream_error")
 		h.reject(writer, http.StatusBadGateway, "upstream_error", "无法创建上游请求")

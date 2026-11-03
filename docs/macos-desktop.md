@@ -16,9 +16,13 @@
 4. 点击“保存并应用”，然后将客户端 API 基础地址改为页面显示的地址，通常为 `http://127.0.0.1:18080/v1`，保留客户端原认证。
 5. 如需网关保存上游 Key，选择“由网关配置上游 API Key”，保存后点击“复制本地令牌”，将此令牌用于客户端认证。
 
-自 `0.1.1` 起，Chat Completions 同时接受 `POST /chat/completions` 和 `POST /v1/chat/completions`。两种路径执行相同检测、脱敏及审计，并按同一上游配置转发，不重复拼接 `/v1`；Responses 仍使用 `POST /v1/responses`。
+自 `0.1.1` 起，Chat Completions 同时接受 `POST /chat/completions` 和 `POST /v1/chat/completions`。当前源码的 Responses 也同时接受 `POST /responses` 和 `POST /v1/responses`，已发布的 `0.1.5` 包尚未包含 `/responses` 别名。每个接口的两种路径执行相同检测、脱敏及审计，并按同一上游配置转发，不重复拼接 `/v1`。
 
-自 `0.1.2` 起，新增 `POST /images/generations`（JSON）和 `POST /images/edits`（JSON 或 multipart）。这两个本地入口不加 `/v1`，例如直接请求 `http://127.0.0.1:18080/images/generations`；图片客户端若自动附加 `/images/...`，其 Base URL 应设为 `http://127.0.0.1:18080`。上游仍可配置为 `http://192.168.137.250:33000/v1/`，转发路径为 `/v1/images/...`。`/alpha/search` 暂不支持。
+自 `0.1.5` 起支持 `GET /models` 和 `GET /v1/models` 获取上游模型列表。Cherry Studio 使用 OpenAI 兼容提供商时，可将 API 基础地址设为 `http://127.0.0.1:18080/v1`，再获取模型列表。两种入口均向上游 Base URL 追加 `/models`；沿用当前认证方式，不修改返回的模型名。
+
+`0.1.5` 同时增加拒绝请求的接口诊断：在“审计日志 → 阻断 / 拒绝”中查看请求方法、脱敏路径、本地状态码和请求 ID，无需开启实时采集。升级前从菜单栏退出旧实例并备份整个数据目录；新版启动时将规则和审计数据库升级至 Schema 4，保留配置和历史记录。旧版程序不能直接打开升级后的数据库，回退需恢复升级前备份。
+
+自 `0.1.2` 起，新增 `POST /images/generations`（JSON）和 `POST /images/edits`（JSON 或 multipart）。当前源码也接受 `/v1/images/generations` 和 `/v1/images/edits` 别名，已发布的 `0.1.5` 包尚未包含别名支持。图片客户端若自动附加 `/images/...`，本地 Base URL 可设为 `http://127.0.0.1:18080` 或 `http://127.0.0.1:18080/v1`。两种入口均按上游 Base URL 拼接，例如上游配置为 `http://192.168.137.250:33000/v1/`，转发路径为 `/v1/images/...`，不会重复 `/v1`。`/alpha/search` 暂不支持。
 
 图片生成示例（`GATEWAY_BEARER` 使用客户端原密钥；网关持钥模式则使用本地令牌）：
 

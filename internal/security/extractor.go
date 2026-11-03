@@ -29,6 +29,7 @@ func extractPayload(body []byte, validate func(map[string]any) error) (Payload, 
 type extractionOptions struct {
 	images    bool
 	imageEdit bool
+	chat      bool
 }
 
 func extractPayloadWithOptions(body []byte, validate func(map[string]any) error, options extractionOptions) (Payload, error) {
@@ -106,7 +107,8 @@ func decodeValue(decoder *json.Decoder, path, key string, depth int, texts *[]Te
 			}
 			seen[childKey] = struct{}{}
 			imageReference := options.imageEdit && isImageReferencePath(path) && (childKey == "image_url" || childKey == "file_id")
-			if unsupportedKeys[childKey] && !isJSONSchemaPath(path) && !(!options.images && childKey == "image_url" && isImageContentPath(path)) && !imageReference {
+			chatImage := options.chat && isChatImageContentPath(path) && childKey == "image_url"
+			if unsupportedKeys[childKey] && !isJSONSchemaPath(path) && !(!options.images && childKey == "image_url" && isImageContentPath(path)) && !imageReference && !chatImage {
 				return nil, fmt.Errorf("不支持的附件字段: %s", childKey)
 			}
 			childPath := path + "/" + escapePointer(childKey)
@@ -121,8 +123,24 @@ func decodeValue(decoder *json.Decoder, path, key string, depth int, texts *[]Te
 		if _, err := decoder.Token(); err != nil {
 			return nil, err
 		}
-		if rawType, ok := object["type"].(string); ok && unsupportedType(rawType) && !(!options.images && rawType == "input_image" && isImageContentPath(path)) {
+		chatImage := options.chat && isChatImageContentPath(path)
+		if rawType, ok := object["type"].(string); ok && unsupportedType(rawType) && !(!options.images && rawType == "input_image" && isImageContentPath(path)) && !(chatImage && rawType == "image_url") {
 			return nil, fmt.Errorf("不支持的附件或二进制内容类型: %s", rawType)
+		}
+		if _, hasImage := object["image_url"]; chatImage && (hasImage || object["type"] == "image_url") {
+			if err := validateChatImagePart(object, path); err != nil {
+				return nil, err
+			}
+			imageURL := object["image_url"].(map[string]any)["url"].(string)
+			if strings.HasPrefix(imageURL, "data:") {
+				// 仅豁免已验证图片对象的 url 值；键名和扩展字段仍参与检测。
+				for index := len(*texts) - 1; index >= 0; index-- {
+					if (*texts)[index].Path == path+"/image_url/url" && (*texts)[index].Value == imageURL {
+						*texts = append((*texts)[:index], (*texts)[index+1:]...)
+						break
+					}
+				}
+			}
 		}
 		if image, exists := object["image_url"]; exists && !options.images && isImageContentPath(path) {
 			if object["type"] != "input_image" {

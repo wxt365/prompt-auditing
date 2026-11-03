@@ -20,6 +20,9 @@ type Event struct {
 	UpstreamStatus  *int            `json:"upstream_status"`
 	DurationMS      int64           `json:"duration_ms"`
 	ErrorCode       string          `json:"error_code,omitempty"`
+	RequestMethod   string          `json:"request_method,omitempty"`
+	RequestPath     string          `json:"request_path,omitempty"`
+	HTTPStatus      int             `json:"http_status,omitempty"`
 	Matches         []Match         `json:"-"`
 }
 

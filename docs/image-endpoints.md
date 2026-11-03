@@ -1,15 +1,36 @@
 # 图片接口使用说明
 
+## 对话中发送图片
+
+当前源码支持 `POST /chat/completions` 和 `POST /v1/chat/completions` 中的标准图片消息；已发布的 `0.1.5` 包尚未包含此支持。这是对话图片输入，与下方的图片生成、编辑接口分别处理。
+
+```json
+{
+  "model": "支持图片输入的模型名称",
+  "messages": [{
+    "role": "user",
+    "content": [
+      {"type": "text", "text": "请描述这张图片"},
+      {"type": "image_url", "image_url": {"url": "https://example.com/image.png", "detail": "auto"}}
+    ]
+  }]
+}
+```
+
+`image_url.url` 支持 HTTP/HTTPS 图片地址，或 PNG、JPEG、WebP、GIF 的 Base64 data URL；同一 `content` 可含多张图片。可选 `detail` 支持 `auto`、`low`、`high`、`original`。模型的实际图片能力由上游决定，格式参考 [OpenAI Chat Completions 文档](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)。
+
+文字继续参与规则检测与脱敏；图片地址、模型名、角色、类型、精度和扩展字段参与检测，但不能安全替换时阻断。只有位于上述标准路径且通过格式校验的内嵌图片数据跳过文本扫描；不会下载 URL 或进行 OCR。无脱敏时请求原始字节保持不变，脱敏时只修改文本，保留图片数据。支持整包 gzip 和 JSON/SSE 响应；文件、PDF、音频附件仍不支持。
+
 ## 入口与配置
 
 | 本地接口 | 请求格式 |
 | --- | --- |
-| `POST /images/generations` | `application/json` |
-| `POST /images/edits` | `application/json` 或 `multipart/form-data` |
+| `POST /images/generations`、`POST /v1/images/generations` | `application/json` |
+| `POST /images/edits`、`POST /v1/images/edits` | `application/json` 或 `multipart/form-data` |
 
-新增入口不带版本前缀，`/v1/images/generations` 和 `/v1/images/edits` 返回 404。Chat Completions 仍接受 `/chat/completions` 和 `/v1/chat/completions`，Responses 使用 `/v1/responses`。截至 2026-10-29 未在 OpenAI 官方文档检索到 `/alpha/search` 的公开接口定义，暂不加入。
+当前源码同时接受带 `/v1` 和不带前缀的图片入口，两种路径共用检测、脱敏、审计与转发逻辑，日志保留客户端原路径；已发布的 `0.1.5` 包尚未包含图片路径别名支持。Chat Completions 接受 `/chat/completions` 和 `/v1/chat/completions`，Responses 接受 `/responses` 和 `/v1/responses`（`0.1.5` 包尚未包含 `/responses` 别名）。截至 2026-10-29 未在 OpenAI 官方文档检索到 `/alpha/search` 的公开接口定义，暂不加入。
 
-上游填写 Base URL，支持 HTTP 和 HTTPS，图片入口直接附加到该地址：
+上游填写 Base URL，支持 HTTP 和 HTTPS。两种本地入口均先归一化为 `/images/...`，再附加到上游地址：
 
 | 上游配置 | 图片生成实际转发地址 |
 | --- | --- |
@@ -17,7 +38,7 @@
 | `https://api.example.com/v1` | `https://api.example.com/v1/images/generations` |
 | `https://api.example.com` | `https://api.example.com/images/generations` |
 
-Gateway 不会为图片请求自动补 `/v1`。客户端如果在 Base URL 后自动附加 `/images/...`，本地 Base URL 设为 `http://127.0.0.1:18080`，不使用管理页面向 Responses 显示的 `/v1` 后缀。
+Gateway 不会为图片请求自动补 `/v1`，也不会重复添加版本前缀。客户端如果在 Base URL 后自动附加 `/images/...`，本地 Base URL 可设为 `http://127.0.0.1:18080` 或 `http://127.0.0.1:18080/v1`。实际转发是否带 `/v1` 由上游 Base URL 决定，两种本地入口的目标一致。
 
 所有请求都需要 Bearer 认证。“沿用客户端认证”使用客户端现有的上游密钥；“由网关配置上游 API Key”使用网关提供的本地令牌。以下命令假定已将对应凭证放入 `GATEWAY_BEARER` 环境变量，不要把凭证写入文档或提交到仓库。
 

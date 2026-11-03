@@ -1,8 +1,10 @@
 # Codex Security Gateway
 
-本地 Prompt 安全审计代理，同时处理 `POST /v1/responses` 和 `POST /v1/chat/completions`，支持文本请求、普通 JSON 和 SSE 流式响应。Chat Completions 也接受不带版本前缀的 `POST /chat/completions`，两种路径使用相同检测与审计流程，按配置的上游地址拼接标准接口路径，不重复添加 `/v1`。Responses 支持带图片及自定义工具历史的 Codex 会话：文本参与审计，图片原样转发，图片内容不做识别。Gateway 只监听回环地址，在请求发送到固定 HTTP 或 HTTPS 上游前执行阻断、告警和非级联脱敏，并将规则与审计分别保存到 `policy.db` 和 `audit.db`。
+本地 Prompt 安全审计代理，同时处理 `POST /v1/responses` 和 `POST /v1/chat/completions`，支持文本请求、普通 JSON 和 SSE 流式响应。当前源码还接受不带版本前缀的 `POST /responses`（已发布的 `0.1.5` 包尚未包含此别名）和 `POST /chat/completions`，每个接口的两种路径使用相同检测与审计流程，按配置的上游地址拼接标准接口路径，不重复添加 `/v1`。Responses 支持带图片及自定义工具历史的 Codex 会话：文本参与审计，图片原样转发，图片内容不做识别。Gateway 只监听回环地址，在请求发送到固定 HTTP 或 HTTPS 上游前执行阻断、告警和非级联脱敏，并将规则与审计分别保存到 `policy.db` 和 `audit.db`。
 
-图片接口使用不带版本前缀的 `POST /images/generations` 和 `POST /images/edits`。生成接受 JSON，编辑接受 JSON 图片引用或 multipart 文件上传；提示词参与检测与脱敏，图片内容不做识别。请求示例、上游路径拼接及审计边界见 [图片接口使用说明](docs/image-endpoints.md)。`/alpha/search` 暂不支持。
+图片接口支持 `POST /images/generations` 和 `POST /images/edits`，当前源码也接受对应的 `/v1/images/generations` 和 `/v1/images/edits` 别名（已发布的 `0.1.5` 包尚未包含别名支持）。生成接受 JSON，编辑接受 JSON 图片引用或 multipart 文件上传；提示词参与检测与脱敏，图片内容不做识别。请求示例、上游路径拼接及审计边界见 [图片接口使用说明](docs/image-endpoints.md)。`/alpha/search` 暂不支持。
+
+自 `0.1.5` 起支持 `GET /models` 和 `GET /v1/models`，用于 Cherry Studio 等 OpenAI 兼容客户端获取上游真实模型列表。两个入口均向配置的 Base URL 追加 `/models`：例如 `http://192.168.137.250:33000/v1/` 转发至 `/v1/models`，根地址则转发至 `/models`。沿用所选认证方式、并发限制、审计失败关闭及上游错误处理；不检查或修改返回的模型名称。请求无需正文或 Content-Type，暂不接受查询参数、正文或协议升级。审计记录与已开启的实时日志保留客户端原路径；查看成功记录需在审计筛选中选择“全部”或“放行”。`0.1.5` 同时包含拒绝请求路径日志，数据库升级至 Schema 4；升级前退出旧实例并备份数据目录，回退需恢复升级前备份。
 
 当前源码新安装默认请求体上限为 **1 GiB（1024 MiB，1073741824 字节）**，为官方图片请求和多图上传预留空间，可按上游需要继续调大；gzip 压缩与解压后的大小均受限，超限返回 413。升级保留已保存的限制；已有桌面版若仍为 5 或 100 MiB，请在“连接设置 → 请求限制与审计保留”改为 1024 并保存应用。CLI 修改 `max_body_bytes: 1073741824` 后重启。模型、图片尺寸等业务限制由上游判断；此调整不增加 PDF 或其他未支持附件的处理能力。已发布的 `0.1.3` 包仍默认 100 MiB。
 

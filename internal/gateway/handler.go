@@ -27,10 +27,15 @@ import (
 )
 
 const responsesPath = "/v1/responses"
+const responsesAliasPath = "/responses"
 const chatCompletionsPath = "/v1/chat/completions"
 const chatCompletionsAliasPath = "/chat/completions"
 const imagesGenerationsPath = "/images/generations"
 const imagesEditsPath = "/images/edits"
+const imagesGenerationsAliasPath = "/v1/images/generations"
+const imagesEditsAliasPath = "/v1/images/edits"
+const modelsPath = "/models"
+const modelsAliasPath = "/v1/models"
 
 const redactedCredential = "[REDACTED_GATEWAY_CREDENTIAL]"
 
@@ -80,6 +85,7 @@ type Handler struct {
 	payloadError func(string)
 	requestLog   *RequestLog
 	trace        *requestTrace
+	requestPath  string
 	limits       config.LimitsConfig
 	semaphore    chan struct{}
 	osUser       string
@@ -132,17 +138,29 @@ func (h *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	requestID := newRequestID()
 	writer.Header().Set("x-gateway-request-id", requestID)
 	started := h.now()
-	if trace := h.requestLog.begin(requestID, request.Method, request.URL.Path); trace != nil {
-		current := *h
-		current.trace = trace
-		h = &current
-	}
+	current := *h
+	current.requestPath = diagnosticPath(request.URL.Path, h.localToken, h.upstreamKey, clientBearer(request))
+	current.trace = h.requestLog.begin(requestID, request.Method, current.requestPath)
+	h = &current
 	returned := false
 	defer func() { h.trace.finish(returned, request.Context().Err() != nil) }()
-	if request.URL.Path == chatCompletionsAliasPath {
+	path := request.URL.Path
+	switch path {
+	case responsesAliasPath:
+		path = responsesPath
+	case chatCompletionsAliasPath:
+		path = chatCompletionsPath
+	case modelsAliasPath:
+		path = modelsPath
+	case imagesGenerationsAliasPath:
+		path = imagesGenerationsPath
+	case imagesEditsAliasPath:
+		path = imagesEditsPath
+	}
+	if path != request.URL.Path {
 		// 别名在请求副本中归一化，共用校验和转发；日志保留客户端原始路径。
 		request = request.Clone(request.Context())
-		request.URL.Path = chatCompletionsPath
+		request.URL.Path = path
 		request.URL.RawPath = ""
 	}
 	h.serveRequest(writer, request, requestID, started)
@@ -155,7 +173,7 @@ func (h *Handler) serveRequest(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	if !h.authorized(request) {
-		h.recordSystemFailure(requestID, "gateway_unauthorized", started)
+		h.recordRequestRejection(requestID, "gateway_unauthorized", started, request, http.StatusUnauthorized)
 		h.reject(writer, http.StatusUnauthorized, "gateway_unauthorized", "请求认证信息缺失或无效")
 		return
 	}
@@ -167,17 +185,21 @@ func (h *Handler) serveRequest(writer http.ResponseWriter, request *http.Request
 		h = &current
 	}
 	if !supportedRequestPath(request.URL.Path) || request.URL.RawQuery != "" {
-		h.recordSystemFailure(requestID, "gateway_route_not_supported", started)
+		h.recordRequestRejection(requestID, "gateway_route_not_supported", started, request, http.StatusNotFound)
 		h.reject(writer, http.StatusNotFound, "gateway_route_not_supported", "请求路径不受支持")
 		return
 	}
-	if request.Method != http.MethodPost {
-		h.recordSystemFailure(requestID, "gateway_route_not_supported", started)
+	expectedMethod := http.MethodPost
+	if request.URL.Path == modelsPath {
+		expectedMethod = http.MethodGet
+	}
+	if request.Method != expectedMethod {
+		h.recordRequestRejection(requestID, "gateway_route_not_supported", started, request, http.StatusMethodNotAllowed)
 		h.reject(writer, http.StatusMethodNotAllowed, "gateway_route_not_supported", "请求方法不受支持")
 		return
 	}
 	if isUpgradeRequest(request) {
-		h.recordSystemFailure(requestID, "gateway_route_not_supported", started)
+		h.recordRequestRejection(requestID, "gateway_route_not_supported", started, request, http.StatusBadRequest)
 		h.reject(writer, http.StatusBadRequest, "gateway_route_not_supported", "协议升级不受支持")
 		return
 	}
@@ -190,6 +212,10 @@ func (h *Handler) serveRequest(writer http.ResponseWriter, request *http.Request
 		return
 	}
 
+	if request.URL.Path == modelsPath {
+		h.handleModels(writer, request, requestID, started)
+		return
+	}
 	h.trace.phase("reading")
 	original, decoded, encoding, err := h.readRequestBody(request)
 	if err != nil {
@@ -309,7 +335,7 @@ func (h *Handler) serveRequest(writer http.ResponseWriter, request *http.Request
 
 func supportedRequestPath(path string) bool {
 	switch path {
-	case responsesPath, chatCompletionsPath, imagesGenerationsPath, imagesEditsPath:
+	case responsesPath, chatCompletionsPath, imagesGenerationsPath, imagesEditsPath, modelsPath, modelsAliasPath:
 		return true
 	}
 	return false
@@ -560,11 +586,25 @@ func matchedKeywords(matches []security.Match) []string {
 }
 
 func (h *Handler) recordSystemFailure(requestID, errorCode string, started time.Time) {
-	err := h.audit.Write(audit.Event{
+	h.writeSystemFailure(audit.Event{
 		EventType: "system_error", RequestID: requestID, User: h.osUser,
 		RuleSetVersion: h.engine.RuleSetVersion(), Action: "block", Result: "rejected",
 		ErrorCode: errorCode, DurationMS: h.now().Sub(started).Milliseconds(),
 	})
+}
+
+func (h *Handler) recordRequestRejection(requestID, errorCode string, started time.Time, request *http.Request, status int) {
+	h.writeSystemFailure(audit.Event{
+		EventType: "system_error", RequestID: requestID, User: h.osUser,
+		RuleSetVersion: h.engine.RuleSetVersion(), Action: "block", Result: "rejected",
+		ErrorCode: errorCode, DurationMS: h.now().Sub(started).Milliseconds(),
+		RequestMethod: diagnosticMethod(request.Method),
+		RequestPath:   h.requestPath, HTTPStatus: status,
+	})
+}
+
+func (h *Handler) writeSystemFailure(event audit.Event) {
+	err := h.audit.Write(event)
 	if err != nil {
 		h.audit.MarkUnhealthy()
 		h.trace.update(func(e *RequestLogEntry) { e.AuditError = true })

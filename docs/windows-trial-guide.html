@@ -34,7 +34,8 @@ body{font:15px/1.85 "Segoe UI","Microsoft YaHei",sans-serif;color:#243247;backgr
 <table><thead><tr><th>项目</th><th>设置方式</th></tr></thead><tbody>
 <tr><td>API 基础地址 / Base URL</td><td><code>http://127.0.0.1:18080/v1</code>；端口以管理页“客户端接入”显示为准。</td></tr>
 <tr><td>模型名称</td><td>保持上游服务支持的模型名。网关不提供模型、不转换模型名。</td></tr>
-<tr><td>Responses</td><td>客户端选择 Responses，网关转发到上游的 <code>/v1/responses</code>。支持省略消息 <code>type</code> 的 <code>role/content</code> 简写。支持历史 <code>output_text.logprobs</code>、非空引用信息和各层 <code>metadata</code>。两种接口的普通 JSON 扩展字段均递归审计并保留转发，不再要求逐项登记字段名；未知 JSON 类型也参与检查，是否被模型接口接受由上游决定。</td></tr>
+<tr><td>获取模型列表</td><td>自 0.1.5 起支持 <code>GET /models</code> 和 <code>GET /v1/models</code>，按当前认证方式转发到上游 Base URL 下的 <code>/models</code>。Cherry Studio 使用 OpenAI 兼容提供商时，可将 API 基础地址设为 <code>http://127.0.0.1:18080/v1</code> 后获取列表。</td></tr>
+<tr><td>Responses</td><td>客户端选择 Responses，当前源码同时接受本地 <code>/responses</code> 和 <code>/v1/responses</code>（已发布的 0.1.5 包尚无 <code>/responses</code> 别名），两种入口共用检测与审计，网关转发到上游的 <code>/v1/responses</code>。支持省略消息 <code>type</code> 的 <code>role/content</code> 简写。支持历史 <code>output_text.logprobs</code>、非空引用信息和各层 <code>metadata</code>。两种接口的普通 JSON 扩展字段均递归审计并保留转发，不再要求逐项登记字段名；未知 JSON 类型也参与检查，是否被模型接口接受由上游决定。</td></tr>
 <tr><td>Chat Completions</td><td>客户端选择 Chat Completions，网关转发到上游的 <code>/v1/chat/completions</code>。适用于提供 OpenAI 兼容接口的客户端。</td></tr>
 <tr><td>沿用客户端认证（推荐）</td><td>保留客户端原有 API Key。认证头转发给固定上游，由上游验证；认证头不参与内容规则检测。</td></tr>
 <tr><td>由网关配置上游 API Key</td><td>在管理页填写上游 Key，保存后点击“复制本地令牌”，将令牌作为客户端的认证密钥。上游 Key 由 Windows 系统加密保存，不回显。</td></tr>
@@ -87,7 +88,7 @@ body{font:15px/1.85 "Segoe UI","Microsoft YaHei",sans-serif;color:#243247;backgr
 <h3>为什么其他人第一次启动没有我的上游地址？</h3>
 <p>试用包只包含程序、内置规则与说明。每位用户需要在管理页填写自己的上游地址和认证配置；不会分发原使用者的配置库、密钥或审计日志。</p>
 <h3>升级、回退与数据位置</h3>
-<p>设置和日志保存在 <code>%APPDATA%\CodexSecurityGateway</code>，与 EXE 所在目录分离。升级前从托盘退出旧版，备份整个数据目录，再启动新版。新版自动升级规则库和审计库到版本 3，保留已有规则及日志，默认规则只写入新建库；旧记录缺少逐条动作时不会猜测补写。</p>
+<p>设置和日志保存在 <code>%APPDATA%\CodexSecurityGateway</code>，与 EXE 所在目录分离。升级前从托盘退出旧版，备份整个数据目录，再启动新版。0.1.5 自动升级规则库和审计库到版本 4，保留已有规则及日志，默认规则只写入新建库；旧记录缺少逐条动作或接口信息时不会猜测补写。</p>
 <p class="warn">旧版不能直接打开升级后的数据库。需要回退时，先退出新版，再恢复升级前的整份备份并启动相应旧版。备份数据应妥善保管；审计库中可能保存被阻断请求的原文。卸载只需退出程序后删除解压目录；是否保留数据目录由用户决定。</p>
 <p>试用程序尚未进行数字签名。如果 Windows 显示未知发布者，请先确认包的来源并核对校验值；受组织管理的设备按本单位软件使用规定处理。</p>
 
