@@ -31,14 +31,18 @@ try {
     # 使用与本次构建一致的版本号生成说明，避免包内标识不一致。
     $GatewayGuideText = [IO.File]::ReadAllText($GatewayGuideSource).Replace('trial-20261028.3', $GatewayVersion)
     [IO.File]::WriteAllText($GatewayGuide, $GatewayGuideText, (New-Object Text.UTF8Encoding($false)))
-    $GatewayChecksums = foreach ($GatewayFile in @($GatewayBinary, $GatewayGuide)) {
+    $GatewayImageGuide = Join-Path $GatewayOutput 'image-endpoints.md'
+    $GatewayResponsesGuide = Join-Path $GatewayOutput 'responses-websocket.md'
+    Copy-Item -LiteralPath (Join-Path $GatewayRoot 'docs/image-endpoints.md') -Destination $GatewayImageGuide
+    Copy-Item -LiteralPath (Join-Path $GatewayRoot 'docs/responses-websocket.md') -Destination $GatewayResponsesGuide
+    $GatewayChecksums = foreach ($GatewayFile in @($GatewayBinary, $GatewayGuide, $GatewayImageGuide, $GatewayResponsesGuide)) {
         $GatewayHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $GatewayFile).Hash.ToLowerInvariant()
         "$GatewayHash  $([IO.Path]::GetFileName($GatewayFile))"
     }
     $GatewayChecksumFile = Join-Path $GatewayOutput 'SHA256SUMS.txt'
     [IO.File]::WriteAllLines($GatewayChecksumFile, $GatewayChecksums, (New-Object Text.UTF8Encoding($false)))
-    # 明确只打包这三个文件，避免混入本机配置、日志或历史构建。
-    Compress-Archive -LiteralPath @($GatewayBinary, $GatewayGuide, $GatewayChecksumFile) -DestinationPath $GatewayArchive -CompressionLevel Optimal
+    # 明确只打包程序、说明和校验文件，避免混入本机配置、日志或历史构建。
+    Compress-Archive -LiteralPath @($GatewayBinary, $GatewayGuide, $GatewayImageGuide, $GatewayResponsesGuide, $GatewayChecksumFile) -DestinationPath $GatewayArchive -CompressionLevel Optimal
     $GatewayArchiveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $GatewayArchive).Hash.ToLowerInvariant()
     [IO.File]::WriteAllText("$GatewayArchive.sha256", "$GatewayArchiveHash  $PackageName.zip`r`n", (New-Object Text.UTF8Encoding($false)))
     Write-Output "Package: $GatewayArchive"

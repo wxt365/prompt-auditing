@@ -1,5 +1,7 @@
 # Codex Security Gateway 轻量化设计文档（MVP）
 
+> 2026-11-03 协议演进：`0.1.7` 测试包新增 Responses WebSocket 双路径和指定响应 GET 查询。下文旧 MVP 的“不支持 Responses WebSocket”及 FR-PXY-010 中对应限制，以 [Responses 长连接与查询](responses-websocket.md) 为准；仅放行经过逐事件内容检测和审计的 WebSocket JSON 请求，未知事件及二进制仍默认拒绝。真实客户端与实际上游联调尚未完成。
+
 | 属性 | 内容 |
 | --- | --- |
 | 文档状态 | 实现中，外部验收未闭合 |

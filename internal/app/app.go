@@ -204,7 +204,8 @@ func (r runner) start(args []string) error {
 		return err
 	}
 	handler, err := gateway.NewHandler(gateway.Options{
-		Upstream: upstream, Client: client, Engine: engine, Audit: auditStore,
+		UpstreamHeaderTimeout: cfg.UpstreamHeaderTimeout,
+		Upstream:              upstream, Client: client, Engine: engine, Audit: auditStore,
 		LocalToken: localToken, UpstreamKey: upstreamKey,
 		Limits: config.LimitsConfig{
 			MaxCompressedBytes: cfg.MaxBodyBytes, MaxDecompressedBytes: cfg.MaxBodyBytes,
@@ -218,6 +219,8 @@ func (r runner) start(args []string) error {
 		Addr: cfg.Listen, Handler: handler, ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout: 90 * time.Second, MaxHeaderBytes: 1 << 20,
 	}
+	server.RegisterOnShutdown(handler.CloseWebSockets)
+	defer handler.CloseWebSockets()
 	listener, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		return fmt.Errorf("监听 Gateway 地址 %s: %w", cfg.Listen, err)

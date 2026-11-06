@@ -60,36 +60,43 @@ type SecurityEngine interface {
 }
 
 type Options struct {
-	Upstream     *url.URL
-	Client       *http.Client
-	Engine       SecurityEngine
-	Audit        Auditor
-	LocalToken   string
-	UpstreamKey  string
-	ClientAuth   bool
-	PayloadError func(string)
-	RequestLog   *RequestLog
-	Limits       config.LimitsConfig
-	OSUser       string
-	Now          func() time.Time
+	UpstreamHeaderTimeout time.Duration
+	Upstream              *url.URL
+	Client                *http.Client
+	Engine                SecurityEngine
+	Audit                 Auditor
+	LocalToken            string
+	UpstreamKey           string
+	ClientAuth            bool
+	PayloadError          func(string)
+	RequestLog            *RequestLog
+	Limits                config.LimitsConfig
+	OSUser                string
+	Now                   func() time.Time
 }
 
 type Handler struct {
-	upstream     *url.URL
-	client       *http.Client
-	engine       SecurityEngine
-	audit        Auditor
-	localToken   string
-	upstreamKey  string
-	clientAuth   bool
-	payloadError func(string)
-	requestLog   *RequestLog
-	trace        *requestTrace
-	requestPath  string
-	limits       config.LimitsConfig
-	semaphore    chan struct{}
-	osUser       string
-	now          func() time.Time
+	upstreamHeaderTimeout time.Duration
+	upstream              *url.URL
+	client                *http.Client
+	engine                SecurityEngine
+	audit                 Auditor
+	localToken            string
+	upstreamKey           string
+	clientAuth            bool
+	payloadError          func(string)
+	requestLog            *RequestLog
+	trace                 *requestTrace
+	requestPath           string
+	requestMethod         string
+	limits                config.LimitsConfig
+	semaphore             chan struct{}
+	osUser                string
+	now                   func() time.Time
+	webSockets            *webSocketConnections
+	concurrency           *concurrencyTracker
+	activity              *ActiveRequest
+	webSocketEvent        bool
 }
 
 func NewHandler(options Options) (*Handler, error) {
@@ -109,6 +116,12 @@ func NewHandler(options Options) (*Handler, error) {
 	if options.Limits.MaxCompressedBytes <= 0 || options.Limits.MaxDecompressedBytes <= 0 || options.Limits.MaxConcurrent <= 0 {
 		return nil, errors.New("Gateway 请求限制无效")
 	}
+	if options.UpstreamHeaderTimeout == 0 {
+		options.UpstreamHeaderTimeout = config.DefaultUpstreamHeaderTimeoutSeconds * time.Second
+	}
+	if options.UpstreamHeaderTimeout < 0 {
+		return nil, errors.New("上游响应头等待时间必须大于零")
+	}
 	if options.OSUser == "" {
 		current, err := user.Current()
 		if err != nil {
@@ -127,10 +140,13 @@ func NewHandler(options Options) (*Handler, error) {
 		return http.ErrUseLastResponse
 	}
 	return &Handler{
-		upstream: options.Upstream, client: &client, engine: options.Engine, audit: options.Audit,
+		upstreamHeaderTimeout: options.UpstreamHeaderTimeout,
+		upstream:              options.Upstream, client: &client, engine: options.Engine, audit: options.Audit,
 		localToken: options.LocalToken, upstreamKey: options.UpstreamKey, clientAuth: options.ClientAuth, payloadError: options.PayloadError, limits: options.Limits,
 		requestLog: options.RequestLog,
 		semaphore:  make(chan struct{}, options.Limits.MaxConcurrent), osUser: options.OSUser, now: options.Now,
+		webSockets:  &webSocketConnections{active: make(map[*webSocketSession]struct{})},
+		concurrency: &concurrencyTracker{key: newRequestID(), active: make(map[*ActiveRequest]struct{})},
 	}, nil
 }
 
@@ -140,11 +156,15 @@ func (h *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	started := h.now()
 	current := *h
 	current.requestPath = diagnosticPath(request.URL.Path, h.localToken, h.upstreamKey, clientBearer(request))
+	current.requestMethod = diagnosticMethod(request.Method)
 	current.trace = h.requestLog.begin(requestID, request.Method, current.requestPath)
 	h = &current
 	returned := false
 	defer func() { h.trace.finish(returned, request.Context().Err() != nil) }()
 	path := request.URL.Path
+	if strings.HasPrefix(path, responsesAliasPath+"/") {
+		path = "/v1" + path
+	}
 	switch path {
 	case responsesAliasPath:
 		path = responsesPath
@@ -184,13 +204,15 @@ func (h *Handler) serveRequest(writer http.ResponseWriter, request *http.Request
 		current.upstreamKey = current.localToken
 		h = &current
 	}
-	if !supportedRequestPath(request.URL.Path) || request.URL.RawQuery != "" {
+	retrieval := isResponseRetrievalPath(request.URL.Path)
+	if !supportedRequestPath(request.URL.Path) || (request.URL.RawQuery != "" && !retrieval) {
 		h.recordRequestRejection(requestID, "gateway_route_not_supported", started, request, http.StatusNotFound)
 		h.reject(writer, http.StatusNotFound, "gateway_route_not_supported", "请求路径不受支持")
 		return
 	}
 	expectedMethod := http.MethodPost
-	if request.URL.Path == modelsPath {
+	webSocket := request.URL.Path == responsesPath && request.Method == http.MethodGet && isUpgradeRequest(request)
+	if request.URL.Path == modelsPath || retrieval || webSocket {
 		expectedMethod = http.MethodGet
 	}
 	if request.Method != expectedMethod {
@@ -198,17 +220,19 @@ func (h *Handler) serveRequest(writer http.ResponseWriter, request *http.Request
 		h.reject(writer, http.StatusMethodNotAllowed, "gateway_route_not_supported", "请求方法不受支持")
 		return
 	}
-	if isUpgradeRequest(request) {
+	if isUpgradeRequest(request) && !webSocket {
 		h.recordRequestRejection(requestID, "gateway_route_not_supported", started, request, http.StatusBadRequest)
 		h.reject(writer, http.StatusBadRequest, "gateway_route_not_supported", "协议升级不受支持")
 		return
 	}
-	select {
-	case h.semaphore <- struct{}{}:
-		defer func() { <-h.semaphore }()
-	default:
+	if !h.acquireActivity(request, requestID) {
 		h.recordSystemFailure(requestID, "gateway_busy", started)
 		h.reject(writer, http.StatusTooManyRequests, "gateway_busy", "Gateway 并发请求已达上限")
+		return
+	}
+	defer h.releaseActivity()
+	if webSocket {
+		h.handleResponsesWebSocket(writer, request, requestID, started)
 		return
 	}
 
@@ -216,7 +240,11 @@ func (h *Handler) serveRequest(writer http.ResponseWriter, request *http.Request
 		h.handleModels(writer, request, requestID, started)
 		return
 	}
-	h.trace.phase("reading")
+	if retrieval {
+		h.handleResponseRetrieval(writer, request, requestID, started)
+		return
+	}
+	h.phase("reading")
 	original, decoded, encoding, err := h.readRequestBody(request)
 	if err != nil {
 		code, message, status := bodyError(err)
@@ -260,14 +288,32 @@ func (h *Handler) serveRequest(writer http.ResponseWriter, request *http.Request
 		return
 	}
 
-	h.trace.phase("inspecting")
-	inspectionContext, cancelInspection := context.WithTimeout(request.Context(), securityInspectionTimeout)
+	decision, forwardBody, bodyModified, failure := h.preparePayload(request.Context(), requestID, started, payload, original, encoding, marshalPayload)
+	if failure != nil {
+		h.reject(writer, failure.status, failure.code, failure.message)
+		return
+	}
+	h.forward(writer, request, requestID, started, decision, forwardBody, bodyModified)
+}
+
+type requestFailure struct {
+	status        int
+	code, message string
+}
+
+// HTTP 与 WebSocket 共用逐请求检测、脱敏及转发前审计，任何失败都不发送正文。
+func (h *Handler) preparePayload(ctx context.Context, requestID string, started time.Time, payload security.Payload, original []byte, encoding string, marshalPayload func(security.Payload) ([]byte, error)) (security.Decision, []byte, bool, *requestFailure) {
+	fail := func(status int, code, message string) (security.Decision, []byte, bool, *requestFailure) {
+		return security.Decision{}, nil, false, &requestFailure{status, code, message}
+	}
+	h.identifyPayloadSession(payload)
+	h.phase("inspecting")
+	inspectionContext, cancelInspection := context.WithTimeout(ctx, securityInspectionTimeout)
 	decision, err := inspectSafely(inspectionContext, h.engine, payload)
 	cancelInspection()
 	if err != nil {
 		h.recordSystemFailure(requestID, "security_engine_unavailable", started)
-		h.reject(writer, http.StatusServiceUnavailable, "security_engine_unavailable", "安全检测服务不可用")
-		return
+		return fail(http.StatusServiceUnavailable, "security_engine_unavailable", "安全检测服务不可用")
 	}
 	h.trace.update(func(e *RequestLogEntry) {
 		e.Action = decision.Action
@@ -281,8 +327,7 @@ func (h *Handler) serveRequest(writer http.ResponseWriter, request *http.Request
 		}
 	})
 	if !h.audit.Healthy() {
-		h.reject(writer, http.StatusServiceUnavailable, "audit_unavailable", "审计服务不可用")
-		return
+		return fail(http.StatusServiceUnavailable, "audit_unavailable", "审计服务不可用")
 	}
 	decisionEvent := h.decisionEvent(requestID, decision, started)
 	if decision.Action == security.ActionBlock {
@@ -290,16 +335,13 @@ func (h *Handler) serveRequest(writer http.ResponseWriter, request *http.Request
 		decisionEvent.RequestBody, err = auditRequestBody(payload.Root, h.localToken, h.upstreamKey)
 		if err != nil {
 			h.recordSystemFailure(requestID, "security_engine_unavailable", started)
-			h.reject(writer, http.StatusServiceUnavailable, "security_engine_unavailable", "安全检测服务不可用")
-			return
+			return fail(http.StatusServiceUnavailable, "security_engine_unavailable", "安全检测服务不可用")
 		}
 		if err := h.audit.Write(decisionEvent); err != nil {
 			h.audit.MarkUnhealthy()
-			h.reject(writer, http.StatusServiceUnavailable, "audit_unavailable", "审计服务不可用")
-			return
+			return fail(http.StatusServiceUnavailable, "audit_unavailable", "审计服务不可用")
 		}
-		h.reject(writer, http.StatusForbidden, "prompt_blocked", "内容审计命中风险规则，请调整输入后重试")
-		return
+		return fail(http.StatusForbidden, "prompt_blocked", "内容审计命中风险规则，请调整输入后重试")
 	}
 
 	forwardBody := original
@@ -307,30 +349,26 @@ func (h *Handler) serveRequest(writer http.ResponseWriter, request *http.Request
 	if decision.Action == security.ActionMask {
 		if err := applyMaskSafely(h.engine, payload, decision); err != nil {
 			h.recordSystemFailure(requestID, "security_engine_unavailable", started)
-			h.reject(writer, http.StatusServiceUnavailable, "security_engine_unavailable", "安全检测服务不可用")
-			return
+			return fail(http.StatusServiceUnavailable, "security_engine_unavailable", "安全检测服务不可用")
 		}
 		masked, err := marshalPayload(payload)
 		if err != nil {
 			h.recordSystemFailure(requestID, "security_engine_unavailable", started)
-			h.reject(writer, http.StatusServiceUnavailable, "security_engine_unavailable", "安全检测服务不可用")
-			return
+			return fail(http.StatusServiceUnavailable, "security_engine_unavailable", "安全检测服务不可用")
 		}
 		forwardBody, err = encodeBody(masked, encoding)
 		if err != nil {
 			h.recordSystemFailure(requestID, "security_engine_unavailable", started)
-			h.reject(writer, http.StatusServiceUnavailable, "security_engine_unavailable", "安全检测服务不可用")
-			return
+			return fail(http.StatusServiceUnavailable, "security_engine_unavailable", "安全检测服务不可用")
 		}
 		bodyModified = !bytes.Equal(forwardBody, original)
 	}
 	decisionEvent.Result = "forwarding"
 	if err := h.audit.Write(decisionEvent); err != nil {
 		h.audit.MarkUnhealthy()
-		h.reject(writer, http.StatusServiceUnavailable, "audit_unavailable", "审计服务不可用")
-		return
+		return fail(http.StatusServiceUnavailable, "audit_unavailable", "审计服务不可用")
 	}
-	h.forward(writer, request, requestID, started, decision, forwardBody, bodyModified)
+	return decision, forwardBody, bodyModified, nil
 }
 
 func supportedRequestPath(path string) bool {
@@ -338,7 +376,7 @@ func supportedRequestPath(path string) bool {
 	case responsesPath, chatCompletionsPath, imagesGenerationsPath, imagesEditsPath, modelsPath, modelsAliasPath:
 		return true
 	}
-	return false
+	return isResponseRetrievalPath(path)
 }
 
 func isUpgradeRequest(request *http.Request) bool {
@@ -525,6 +563,7 @@ func redactCredentialString(value string, secrets []string) string {
 func (h *Handler) decisionEvent(requestID string, decision security.Decision, started time.Time) audit.Event {
 	event := audit.Event{
 		EventType: "decision", RequestID: requestID, User: h.osUser,
+		RequestMethod: h.requestMethod, RequestPath: h.requestPath,
 		RuleSetVersion: h.engine.RuleSetVersion(), RuleIDs: uniqueMatches(decision.Matches, func(match security.Match) string { return match.RuleID }),
 		Categories:      uniqueMatches(decision.Matches, func(match security.Match) string { return match.Category }),
 		MatchedKeywords: matchedKeywords(decision.Matches), MatchCount: len(decision.Matches),
@@ -590,6 +629,7 @@ func (h *Handler) recordSystemFailure(requestID, errorCode string, started time.
 		EventType: "system_error", RequestID: requestID, User: h.osUser,
 		RuleSetVersion: h.engine.RuleSetVersion(), Action: "block", Result: "rejected",
 		ErrorCode: errorCode, DurationMS: h.now().Sub(started).Milliseconds(),
+		RequestMethod: h.requestMethod, RequestPath: h.requestPath,
 	})
 }
 

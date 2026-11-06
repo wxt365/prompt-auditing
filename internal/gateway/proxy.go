@@ -11,6 +11,7 @@ import (
 	"mime"
 	"net/http"
 	"net/http/httptrace"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -26,7 +27,7 @@ var hopByHopHeaders = map[string]bool{
 	"Transfer-Encoding": true, "Upgrade": true,
 }
 
-func (h *Handler) forward(writer http.ResponseWriter, incoming *http.Request, requestID string, started time.Time, decision security.Decision, body []byte, bodyModified bool) {
+func (h *Handler) upstreamURL(incoming *http.Request) url.URL {
 	target := *h.upstream
 	basePath := strings.TrimRight(target.Path, "/")
 	if strings.HasSuffix(basePath, "/v1") {
@@ -35,8 +36,13 @@ func (h *Handler) forward(writer http.ResponseWriter, incoming *http.Request, re
 		target.Path = basePath + incoming.URL.Path
 	}
 	target.RawPath = ""
-	target.RawQuery = ""
+	target.RawQuery = incoming.URL.RawQuery
 	target.Fragment = ""
+	return target
+}
+
+func (h *Handler) forward(writer http.ResponseWriter, incoming *http.Request, requestID string, started time.Time, decision security.Decision, body []byte, bodyModified bool) {
+	target := h.upstreamURL(incoming)
 	request, err := http.NewRequestWithContext(incoming.Context(), incoming.Method, target.String(), bytes.NewReader(body))
 	if err != nil {
 		h.complete(requestID, started, decision, nil, "upstream_error", "upstream_error")
@@ -59,7 +65,7 @@ func (h *Handler) forward(writer http.ResponseWriter, incoming *http.Request, re
 	request.ContentLength = int64(len(body))
 	request.Host = target.Host
 
-	h.trace.phase("forwarding")
+	h.phase("forwarding")
 	// 握手失败未必具有公开的错误类型，通过标准跟踪回调确认失败阶段。
 	var tlsFailed atomic.Bool
 	request = request.WithContext(httptrace.WithClientTrace(request.Context(), &httptrace.ClientTrace{
@@ -77,6 +83,11 @@ func (h *Handler) forward(writer http.ResponseWriter, incoming *http.Request, re
 		return
 	}
 	defer response.Body.Close()
+	protocol := "http"
+	if mediaType, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type")); mediaType == "text/event-stream" {
+		protocol = "sse"
+	}
+	h.activityPhase("responding", protocol)
 	h.trace.update(func(e *RequestLogEntry) {
 		e.Phase = "responding"
 		e.UpstreamStatus = response.StatusCode
@@ -265,6 +276,7 @@ func (h *Handler) complete(requestID string, started time.Time, decision securit
 	}
 	event := audit.Event{
 		EventType: "completion", RequestID: requestID, User: h.osUser,
+		RequestMethod: h.requestMethod, RequestPath: h.requestPath,
 		RuleSetVersion: h.engine.RuleSetVersion(), Action: decision.Action, Result: result,
 		UpstreamStatus: upstreamStatus, DurationMS: h.now().Sub(started).Milliseconds(), ErrorCode: errorCode,
 	}

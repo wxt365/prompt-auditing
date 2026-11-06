@@ -1,24 +1,44 @@
 # Codex Security Gateway
 
-本地 Prompt 安全审计代理，同时处理 `POST /v1/responses` 和 `POST /v1/chat/completions`，支持文本请求、普通 JSON 和 SSE 流式响应。当前源码还接受不带版本前缀的 `POST /responses`（已发布的 `0.1.5` 包尚未包含此别名）和 `POST /chat/completions`，每个接口的两种路径使用相同检测与审计流程，按配置的上游地址拼接标准接口路径，不重复添加 `/v1`。Responses 支持带图片及自定义工具历史的 Codex 会话：文本参与审计，图片原样转发，图片内容不做识别。Gateway 只监听回环地址，在请求发送到固定 HTTP 或 HTTPS 上游前执行阻断、告警和非级联脱敏，并将规则与审计分别保存到 `policy.db` 和 `audit.db`。
+`0.1.10` 测试包将上游响应头等待时间默认改为 300 秒，支持在连接设置中调整；保留实时日志紧凑布局与 Session 并发统计。提供 Windows amd64、macOS arm64 和 macOS Intel（amd64）三个包。
 
-图片接口支持 `POST /images/generations` 和 `POST /images/edits`，当前源码也接受对应的 `/v1/images/generations` 和 `/v1/images/edits` 别名（已发布的 `0.1.5` 包尚未包含别名支持）。生成接受 JSON，编辑接受 JSON 图片引用或 multipart 文件上传；提示词参与检测与脱敏，图片内容不做识别。请求示例、上游路径拼接及审计边界见 [图片接口使用说明](docs/image-endpoints.md)。`/alpha/search` 暂不支持。
+本地构建包位于 `dist/`，每个 ZIP 均附使用说明和 SHA-256 校验文件：
+
+| 平台 | 包名 | 启动方式 |
+| --- | --- | --- |
+| Windows x64 | `codex-gateway-windows-amd64-0.1.10.zip` | 解压后运行 `codex-gateway.exe` |
+| macOS Apple Silicon | `codex-gateway-macos-arm64-0.1.10.zip` | 解压后打开 `Codex Security Gateway.app` |
+| macOS Intel | `codex-gateway-macos-amd64-0.1.10.zip` | 解压后打开 `Codex Security Gateway.app` |
+
+macOS 包要求 macOS 13 或更新版本，为临时签名、未公证；Windows 包未签名。Intel 与 Windows 包已交叉构建，尚未完成对应目标机器的原生运行验证。升级前从托盘或菜单栏退出旧版并备份完整数据目录，再启动新版；从 `0.1.5` 至 `0.1.9` 升级不新增数据库迁移，已有配置、规则及请求限制保留。
+
+`0.1.8` 起支持实时并发监控：在“实时日志”查看当前占用 / 上限、按匿名 Session 汇总的 HTTP / SSE / WebSocket 占用及活跃请求明细，无需开启日志采集。
+
+`0.1.7` 起补充 Responses WebSocket：`GET /v1/responses` 与 `GET /responses` 支持协议升级，并对连接内每条请求事件检测、脱敏和审计。响应查询支持 `GET /v1/responses/{response_id}` 与无版本前缀形式，支持 JSON 和 SSE 查询；不带响应 ID、也不升级协议的普通 GET 仍返回 405。使用方式和边界见 [Responses 长连接与查询](docs/responses-websocket.md)。
+
+本地 Prompt 安全审计代理，同时处理 `POST /v1/responses` 和 `POST /v1/chat/completions`，支持文本请求、普通 JSON 和 SSE 流式响应，也接受不带版本前缀的 `POST /responses` 和 `POST /chat/completions`。每个接口的两种路径使用相同检测与审计流程，按配置的上游地址拼接标准接口路径，不重复添加 `/v1`。Responses 支持带图片及自定义工具历史的 Codex 会话：文本参与审计，图片原样转发，图片内容不做识别。Gateway 只监听回环地址，在请求发送到固定 HTTP 或 HTTPS 上游前执行阻断、告警和非级联脱敏，并将规则与审计分别保存到 `policy.db` 和 `audit.db`。
+
+图片接口支持 `POST /images/generations` 和 `POST /images/edits`，也接受对应的 `/v1/images/generations` 和 `/v1/images/edits` 别名。生成接受 JSON，编辑接受 JSON 图片引用或 multipart 文件上传；提示词参与检测与脱敏，图片内容不做识别。请求示例、上游路径拼接及审计边界见 [图片接口使用说明](docs/image-endpoints.md)。`/alpha/search` 暂不支持。
 
 自 `0.1.5` 起支持 `GET /models` 和 `GET /v1/models`，用于 Cherry Studio 等 OpenAI 兼容客户端获取上游真实模型列表。两个入口均向配置的 Base URL 追加 `/models`：例如 `http://192.168.137.250:33000/v1/` 转发至 `/v1/models`，根地址则转发至 `/models`。沿用所选认证方式、并发限制、审计失败关闭及上游错误处理；不检查或修改返回的模型名称。请求无需正文或 Content-Type，暂不接受查询参数、正文或协议升级。审计记录与已开启的实时日志保留客户端原路径；查看成功记录需在审计筛选中选择“全部”或“放行”。`0.1.5` 同时包含拒绝请求路径日志，数据库升级至 Schema 4；升级前退出旧实例并备份数据目录，回退需恢复升级前备份。
 
 当前源码新安装默认请求体上限为 **1 GiB（1024 MiB，1073741824 字节）**，为官方图片请求和多图上传预留空间，可按上游需要继续调大；gzip 压缩与解压后的大小均受限，超限返回 413。升级保留已保存的限制；已有桌面版若仍为 5 或 100 MiB，请在“连接设置 → 请求限制与审计保留”改为 1024 并保存应用。CLI 修改 `max_body_bytes: 1073741824` 后重启。模型、图片尺寸等业务限制由上游判断；此调整不增加 PDF 或其他未支持附件的处理能力。已发布的 `0.1.3` 包仍默认 100 MiB。
 
+自 `0.1.10` 起，上游响应头等待时间默认设为 **300 秒**，可在“连接设置 → 请求限制与审计保留 → 上游响应头等待时间（秒）”修改并“保存并应用”；CLI 在 YAML 设置 `upstream_header_timeout_seconds: 300` 后重启。未设置该字段的旧配置升级后采用 300 秒，已有自定义值保留，无需数据库迁移。该值适用于图片生成/编辑、Responses、Chat Completions、模型列表和响应查询的 HTTP 响应头等待，也用作 WebSocket 握手时限；不限制已经开始的响应正文、SSE 总时长或已建立的 WebSocket 连接。客户端自身的超时需另行核对。已分发的 `0.1.9` 及更早包仍采用原来的 30 秒，需升级至 `0.1.10` 才支持此配置。
+
 ## Windows 桌面使用
 
 试用包解压后双击 `codex-gateway.exe`，首次运行自动打开本地浏览器管理页。完整操作步骤见 [离线使用说明](docs/windows-trial-guide.html)，可用 `scripts/build-windows-package.ps1` 重新生成分发包。
 
-当前 Windows x64 试用版为 `trial-20261028.3`，压缩包位于 `dist/codex-gateway-windows-x64-20261028-r3.zip`，包含程序、离线说明和 SHA-256 校验文件；包含下述首次配置、连接检查及管理查询改进；两种协议统一递归审计并保留普通 JSON 扩展字段，避免客户端新增元数据时反复出现本地 422。详见 [JSON 扩展兼容](docs/json-extensions-20261028.md)。
+当前 Windows x64 试用版为 `0.1.10`，压缩包位于 `dist/codex-gateway-windows-amd64-0.1.10.zip`，包含程序、离线说明和 SHA-256 校验文件。两种协议统一递归审计并保留普通 JSON 扩展字段，避免客户端新增元数据时反复出现本地 422。详见 [JSON 扩展兼容](docs/json-extensions-20261028.md)。
 
 1. 新安装显示“待配置上游”，保存有效连接设置前不启动代理。在“连接设置”填写本地监听端口（默认 `18080`）和实际使用的上游 API 基础地址。本地地址由程序保留为回环地址，默认 `127.0.0.1`。默认选择“沿用客户端认证”，无需填写 API Key。可先点击“检查上游连接”，再点击“保存并应用”；顶部“本地代理运行中”仅表示本地服务正常。修改端口后需同步更新客户端 API 地址。
 2. 在“安全规则”添加、编辑、启停或删除规则，点击“保存并应用规则”。只需填写规则名称，支持中文，最多 128 个字符，例如“敏感字替换”；内部 ID 自动生成，改名不会改变 ID。匹配和替换内容支持中文。
 3. 将客户端 API 基础地址设为页面显示的本地地址，继续使用客户端现有的认证密钥。
 4. 请求被拦截时，打开“审计日志”，点击“查看详情”。顶部直接列出导致阻断的规则，明细中阻断行置顶标红，并与替换预检、仅告警区分；旧记录未保存逐条动作时明确提示无法还原。点击“展开请求内容”查看凭证脱敏后的原始 JSON，命中词会高亮，也可下载完整 JSON。默认查询阻断 / 拒绝记录，可按动作、请求 ID、规则名称和时间筛选并翻页。
-5. 调试请求无响应或重连时，进入“实时日志”点击“开启采集”。每秒刷新接口、处理阶段、本地 / 上游状态码、耗时及异常原因，可筛选请求、只看异常或清空记录。默认关闭，内存保留最近 500 条，关闭页面后继续采集，退出程序后清空。
+5. 调试请求无响应或重连时，进入“实时日志”。顶部无需开启采集即可每秒查看当前并发占用 / 上限、按匿名 Session 分组的占用数，以及活跃请求明细；无法识别 Session 的请求单独汇总，WebSocket 包括空闲连接。点击“开启采集”后，每秒刷新接口、处理阶段、本地 / 上游状态码、耗时及异常原因，可筛选请求、只看异常或清空记录。日志默认关闭，内存保留最近 500 条，关闭页面后继续采集，退出程序后清空；关闭或清空日志不影响并发统计。
+
+Session 分组读取 `session_id` / `X-Session-ID` 请求头或 `client_metadata.session_id`，页面展示的是匿名标签，不是原始 ID 或客户端会话名称。相同 ID 在同一代理实例内合并统计，重启后标签变化；缺失、无效或冲突标识归入“未识别”。默认并发上限为 10，可在“连接设置 → 请求限制与审计保留”调整；所有 Session 共享限额，满额返回 429，不排队。HTTP / SSE 在整个请求结束后释放名额，WebSocket 在连接关闭后释放，连接内事件不重复计数。
 
 桌面模式不需要手工创建 YAML、初始化数据库或设置环境变量。设置自动保存在当前用户的 `%APPDATA%\CodexSecurityGateway` 目录。
 
@@ -36,7 +56,14 @@
 
 macOS 版采用顶部菜单栏图标和同一套浏览器管理页，双击 `.app` 启动，关闭页面后继续代理，从菜单栏退出。凭证由登录钥匙串中的密钥加密保护，数据保存在当前用户的 `~/Library/Application Support/CodexSecurityGateway`。支持 HTTP/HTTPS 上游和两种请求协议。
 
-在 Mac 上执行 `bash scripts/build-macos-package.sh 0.1.3 arm64` 生成 Apple Silicon 桌面包；Intel 使用 `amd64`。桌面包构建需要 CGO 和 Xcode Command Line Tools，默认临时签名，未经过 Apple 公证。安装、配置及验证边界见 [macOS 使用说明](docs/macos-desktop.md)。
+在 Mac 上执行以下命令生成对应桌面包，构建需要 CGO 和 Xcode Command Line Tools，脚本拒绝覆盖同名旧包：
+
+```bash
+bash scripts/build-macos-package.sh 0.1.10 arm64  # Apple Silicon
+bash scripts/build-macos-package.sh 0.1.10 amd64  # Intel
+```
+
+默认临时签名，未经过 Apple 公证。安装、配置及验证边界见 [macOS 使用说明](docs/macos-desktop.md)。
 
 调试期间可让日常 Codex 保持直连，运行 `python -X utf8 scripts/test-codex-gateway.py` 在独立进程中临时走网关；支持图片和旧会话临时副本，不需要反复修改配置或重启。详见 [本机独立测试](docs/local-gateway-testing.md)。
 
@@ -51,10 +78,16 @@ go test ./...
 go build -o codex-gateway ./cmd/codex-gateway
 ```
 
-生成首发双平台产物、版本信息和 SHA-256 校验文件：
+在 Windows PowerShell 中生成带使用说明的桌面 ZIP 包：
+
+```powershell
+.\scripts\build-windows-package.ps1 -GatewayVersion 0.1.10 -PackageName codex-gateway-windows-amd64-0.1.10
+```
+
+单独生成 CLI、Windows 桌面可执行文件、版本信息和 SHA-256 校验文件（不生成 macOS `.app` 或桌面 ZIP 包）：
 
 ```bash
-./scripts/build-release.sh 0.1.0
+./scripts/build-release.sh 0.1.10
 ```
 
 输出目录为 `dist/`：

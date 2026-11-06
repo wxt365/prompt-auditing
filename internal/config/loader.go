@@ -17,6 +17,9 @@ import (
 // DefaultMaxBodyBytes 为官方图片请求及多图 multipart 封装预留空间，同时用于命令行配置和桌面版首次设置。
 const DefaultMaxBodyBytes = 1 << 30
 
+const DefaultUpstreamHeaderTimeoutSeconds = 300
+const MaxUpstreamHeaderTimeoutSeconds = int64((1<<63 - 1) / time.Second)
+
 func Load(path string) (Config, error) {
 	absolutePath, err := filepath.Abs(path)
 	if err != nil {
@@ -65,7 +68,12 @@ func applyDefaults(cfg *Config) {
 	if cfg.AuditMaxBytes == 0 {
 		cfg.AuditMaxBytes = 100 << 20
 	}
-	cfg.UpstreamHeaderTimeout = 30 * time.Second
+	if cfg.UpstreamHeaderTimeoutSeconds == 0 {
+		cfg.UpstreamHeaderTimeoutSeconds = DefaultUpstreamHeaderTimeoutSeconds
+	}
+	if cfg.UpstreamHeaderTimeoutSeconds > 0 && int64(cfg.UpstreamHeaderTimeoutSeconds) <= MaxUpstreamHeaderTimeoutSeconds {
+		cfg.UpstreamHeaderTimeout = time.Duration(cfg.UpstreamHeaderTimeoutSeconds) * time.Second
+	}
 	cfg.ShutdownTimeout = 15 * time.Second
 }
 
@@ -119,6 +127,9 @@ func validate(cfg Config) error {
 	}
 	if cfg.MaxBodyBytes <= 0 || cfg.MaxConcurrentRequests <= 0 || cfg.AuditRetentionDays <= 0 || cfg.AuditMaxBytes <= 0 {
 		return errors.New("请求限制与审计保留参数必须大于零")
+	}
+	if cfg.UpstreamHeaderTimeoutSeconds <= 0 || int64(cfg.UpstreamHeaderTimeoutSeconds) > MaxUpstreamHeaderTimeoutSeconds {
+		return fmt.Errorf("上游响应头等待时间必须为 1 至 %d 秒", MaxUpstreamHeaderTimeoutSeconds)
 	}
 	return nil
 }

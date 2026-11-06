@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xiaotaowang/prompt-auditing/internal/config"
 	"github.com/xiaotaowang/prompt-auditing/internal/storage"
 )
 
@@ -140,6 +141,29 @@ func TestUpstreamClientUsesBoundedConnectionTimeouts(t *testing.T) {
 	if transport.DialContext == nil || transport.TLSHandshakeTimeout <= 0 ||
 		transport.ResponseHeaderTimeout != 30*time.Second || transport.IdleConnTimeout <= 0 {
 		t.Fatalf("上游连接超时配置不完整: %#v", transport)
+	}
+}
+
+func TestConfiguredHeaderTimeoutReachesHTTPTransport(t *testing.T) {
+	t.Setenv("SSL_CERT_FILE", "")
+	for _, seconds := range []int64{0, 1, 600} {
+		cfg, err := config.Prepare(config.Config{Version: 1, Upstream: "https://example.invalid/v1", PolicyDB: "policy.db", AuditDB: "audit.db", UpstreamHeaderTimeoutSeconds: config.HeaderTimeoutSeconds(seconds)}, t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		client, err := newUpstreamHTTPClient(cfg.UpstreamHeaderTimeout)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := time.Duration(seconds) * time.Second
+		if seconds == 0 {
+			want = 300 * time.Second
+		}
+		transport := client.Transport.(*http.Transport)
+		if transport.ResponseHeaderTimeout != want || client.Timeout != 0 {
+			t.Fatalf("配置未生效或意外限制整个响应流: %+v", client)
+		}
+		client.CloseIdleConnections()
 	}
 }
 

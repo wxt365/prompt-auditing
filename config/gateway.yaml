@@ -5,5 +5,6 @@ policy_db: ../data/policy.db
 audit_db: ../data/audit.db
 max_body_bytes: 1073741824
 max_concurrent_requests: 10
+upstream_header_timeout_seconds: 300
 audit_retention_days: 30
 audit_max_bytes: 104857600

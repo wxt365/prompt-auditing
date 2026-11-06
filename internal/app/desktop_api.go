@@ -80,7 +80,16 @@ func (c *desktopController) managementAPI(w http.ResponseWriter, r *http.Request
 		} else if r.Method == http.MethodDelete {
 			logs.Clear()
 		}
-		return writeDesktopJSON(w, logs.Snapshot())
+		state := c.state()
+		concurrency := gateway.ConcurrencySnapshot{Limit: state.values.MaxConcurrentRequests,
+			Items: []gateway.ActiveRequest{}, Sessions: []gateway.SessionConcurrency{}}
+		if state.active != nil && state.active.handler != nil && state.active.running.Load() {
+			concurrency = state.active.handler.ConcurrencySnapshot()
+		}
+		return writeDesktopJSON(w, struct {
+			gateway.RequestLogSnapshot
+			Concurrency gateway.ConcurrencySnapshot `json:"concurrency"`
+		}{logs.Snapshot(), concurrency})
 	case (r.URL.Path == "/api/audits" || strings.HasPrefix(r.URL.Path, "/api/audits/")) && r.Method == http.MethodGet:
 		return c.queryAudits(w, r)
 	case r.URL.Path == "/api/status" && r.Method == http.MethodGet:
@@ -102,7 +111,7 @@ func (c *desktopController) managementAPI(w http.ResponseWriter, r *http.Request
 			"operation": state.operation, "setup_required": state.values.SetupRequired, "error": state.lastError, "payload_error": payloadDetail, "version": c.build.Version, "data_directory": filepath.Dir(cfg.PolicyDB)})
 	case r.URL.Path == "/api/settings" && r.Method == http.MethodGet:
 		state := c.state()
-		return writeDesktopJSON(w, map[string]any{"settings": state.values, "key_configured": state.key != ""})
+		return writeDesktopJSON(w, map[string]any{"settings": state.values.WithDefaults(), "key_configured": state.key != ""})
 	case r.URL.Path == "/api/settings" && r.Method == http.MethodPut:
 		var input struct {
 			settings.Values
@@ -121,6 +130,10 @@ func (c *desktopController) managementAPI(w http.ResponseWriter, r *http.Request
 		var restartError string
 		err := c.withOperation("saving_settings", func() error {
 			state := c.state()
+			// 兼容未提交新增字段的旧管理页，避免覆盖已经保存的自定义超时。
+			if input.UpstreamHeaderTimeoutSeconds == 0 {
+				input.UpstreamHeaderTimeoutSeconds = state.values.WithDefaults().UpstreamHeaderTimeoutSeconds
+			}
 			key := state.key
 			if input.UpstreamKey != "" {
 				key = strings.TrimSpace(input.UpstreamKey)

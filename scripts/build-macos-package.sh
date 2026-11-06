@@ -31,6 +31,8 @@ CGO_ENABLED=1 GOOS=darwin GOARCH="$package_arch" \
   go build -trimpath -ldflags "-X main.version=${package_version}" \
   -o "${package_app}/Contents/MacOS/codex-gateway" ./cmd/codex-gateway-desktop
 cp "${package_root}/docs/macos-desktop.md" "${package_output}/使用说明.md"
+cp "${package_root}/docs/image-endpoints.md" "${package_output}/image-endpoints.md"
+cp "${package_root}/docs/responses-websocket.md" "${package_output}/responses-websocket.md"
 # 默认临时签名供本机测试；Developer ID 签名同时启用公证所需的运行时保护和时间戳。
 package_identity="${MACOS_SIGN_IDENTITY:--}"
 if [[ "$package_identity" == - ]]; then
@@ -42,7 +44,7 @@ codesign --verify --strict "$package_app"
 plutil -lint "${package_app}/Contents/Info.plist"
 (
   cd "$package_output"
-  shasum -a 256 "Codex Security Gateway.app/Contents/MacOS/codex-gateway" "使用说明.md" > SHA256SUMS.txt
+  shasum -a 256 "Codex Security Gateway.app/Contents/MacOS/codex-gateway" "使用说明.md" "image-endpoints.md" "responses-websocket.md" > SHA256SUMS.txt
 )
 ditto -c -k --sequesterRsrc --keepParent "$package_output" "${package_output}.zip"
 (

@@ -108,7 +108,7 @@ async function loadConnection() {
   const clientAuth = values.auth_mode === 'client';
   connection.elements.auth_mode.value = clientAuth ? 'client' : 'gateway';
   updateAuthMode();
-  for (const key of ['upstream','max_concurrent_requests','audit_retention_days']) connection.elements[key].value = values[key];
+  for (const key of ['upstream','max_concurrent_requests','audit_retention_days','upstream_header_timeout_seconds']) connection.elements[key].value = values[key];
   if (values.setup_required) connection.elements.upstream.value = '';
   const separator = values.listen.lastIndexOf(':');
   listenPrefix = values.listen.slice(0,separator+1);
@@ -465,7 +465,7 @@ function renderLiveRows() {
     const details = [];
     if (item.error_code) details.push(auditErrors[item.error_code] || item.error_code);
     if (item.detail) details.push(item.detail);
-    if (item.upstream_status) details.push(`${item.streaming ? 'SSE；' : ''}收到上游响应头 ${item.header_ms} ms`);
+    if (item.upstream_status) details.push(`${item.streaming ? item.upstream_status === 101 ? 'WebSocket；' : 'SSE；' : ''}收到上游响应头 ${item.header_ms} ms`);
     if (item.audit_error) details.push('审计写入失败，请检查运行状态');
     const names = item.rule_names?.length ? item.rule_names : item.rule_ids;
     if (names?.length) details.push(`命中：${names.join('、')}`);
@@ -478,8 +478,48 @@ function renderLiveRows() {
     tbody.append(row);
   }
 }
+function renderConcurrency(data) {
+  const state = $('concurrency-state');
+  const groups = $('concurrency-sessions');
+  const requests = $('concurrency-requests');
+  groups.replaceChildren(); requests.replaceChildren();
+  if (!data) {
+    state.textContent = '当前服务未提供并发统计，请更新并重启代理。';
+    return;
+  }
+  const identified = data.sessions.filter(item => item.session_id).length;
+  const unknown = data.sessions.find(item => !item.session_id)?.current || 0;
+  state.textContent = `${data.running ? '代理运行中' : '代理未运行'} · 当前占用 ${data.current} / ${data.limit} · 已识别 ${identified} 个 Session${unknown ? ` · 未识别 ${unknown} 个名额` : ''} · 每秒刷新`;
+  state.classList.toggle('danger', data.running && data.current >= data.limit);
+  for (const item of data.sessions) {
+    const row = document.createElement('tr');
+    cell(row, item.session_id || '未识别', 'concurrency-session');
+    for (const count of [item.current,item.http,item.sse,item.websocket]) cell(row, count);
+    cell(row, `${(item.longest_ms / 1000).toFixed(1)} 秒`);
+    groups.append(row);
+  }
+  for (const item of data.items) {
+    const row = document.createElement('tr');
+    const id = cell(row, item.request_id, 'audit-request'); id.title = item.request_id;
+    const source = item.session_source === 'conflicting' ? '标识无效或冲突' : item.session_source;
+    cell(row, `${item.session_id || '未识别'}${source ? ` / ${source}` : ''}`, 'concurrency-session');
+    cell(row, `${item.method} ${item.path}`, 'live-path');
+    cell(row, {http:'HTTP',sse:'SSE',websocket:'WebSocket'}[item.protocol] || item.protocol);
+    cell(row, item.protocol === 'websocket' && item.phase === 'responding' ? '连接已建立（含空闲）' : livePhases[item.phase] || item.phase);
+    cell(row, `${(item.duration_ms / 1000).toFixed(1)} 秒`);
+    requests.append(row);
+  }
+  for (const body of [groups,requests]) {
+    if (!body.children.length) {
+      const row = document.createElement('tr');
+      cell(row, data.running ? '当前没有请求占用并发名额。' : '启动代理后显示实时并发占用。').colSpan = 6;
+      body.append(row);
+    }
+  }
+}
 function renderLiveLogs(data) {
   liveSnapshot = data;
+  renderConcurrency(data.concurrency);
   $('live-toggle').textContent = data.enabled ? '关闭采集' : '开启采集';
   $('live-state').textContent = `${data.enabled ? '采集中 · 每秒刷新' : '采集已关闭'} · 已保留 ${data.items.length} / ${data.capacity} 条${data.dropped ? ` · 已淘汰 ${data.dropped} 条较早请求` : ''}`;
   $('live-error').hidden = true;
@@ -494,8 +534,9 @@ async function refreshLiveLogs() {
     if (revision === liveRevision) renderLiveLogs(data);
   } catch (error) {
     if (revision === liveRevision) {
-      $('live-error').textContent = `实时日志连接中断：${error.message}。正在重试，列表可能已过期。`;
+      $('live-error').textContent = `实时监控连接中断：${error.message}。正在重试，并发统计和日志可能已过期。`;
       $('live-error').hidden = false;
+      $('concurrency-state').textContent = '并发统计连接中断，当前显示的明细可能已过期。';
     }
   } finally { liveFetching = false; }
 }
@@ -605,8 +646,11 @@ connection.addEventListener('submit', event => {
     const port = Number(form.listen_port.value);
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('本地监听端口必须是 1 至 65535 的整数。');
     if (port === Number(location.port)) throw new Error('该端口正用于 Web 管理页，请选择其他本地监听端口。');
+    const headerTimeout = Number(form.upstream_header_timeout_seconds.value);
+    if (!Number.isSafeInteger(headerTimeout) || headerTimeout < 1 || headerTimeout > 9223372036) throw new Error('上游响应头等待时间必须是 1 至 9223372036 秒的整数。');
     const result = await api('settings', 'PUT', {auth_mode:form.auth_mode.value,listen:`${listenPrefix}${port}`,upstream:form.upstream.value.trim(),upstream_key:form.auth_mode.value === 'client' ? '' : form.upstream_key.value,
       max_body_bytes:Math.round(Number(form.body_mib.value)*1048576),max_concurrent_requests:Number(form.max_concurrent_requests.value),
+      upstream_header_timeout_seconds:headerTimeout,
       audit_retention_days:Number(form.audit_retention_days.value),audit_max_bytes:Math.round(Number(form.audit_mib.value)*1048576)});
     await loadConnection();
     notice(result.error ? `设置已保存，代理未启动：${result.error}` : '设置已保存并生效。', !!result.error);

@@ -31,6 +31,7 @@
         <details><summary>请求限制与审计保留</summary><div class="form-grid advanced">
           <label>最大请求体（MiB）<input name="body_mib" type="number" min="0.01" step="0.01" required></label>
           <label>最大并发请求数<input name="max_concurrent_requests" type="number" min="1" max="1000" required></label>
+          <label class="full">上游响应头等待时间（秒）<input name="upstream_header_timeout_seconds" type="number" min="1" max="9223372036" step="1" required><small>默认 300 秒，适用于所有上游 HTTP 请求的响应头等待，也用于 WebSocket 握手时限。已开始的响应流和已建立的连接不受此值限制；客户端自己的超时仍可能更短。</small></label>
           <label>审计保留天数<input name="audit_retention_days" type="number" min="1" max="3650" required></label>
           <label>审计容量上限（MiB）<input name="audit_mib" type="number" min="1" max="102400" required></label>
         </div></details>
@@ -74,7 +75,15 @@
       <p class="hint">请求 ID 对应响应头 x-gateway-request-id。规则名称和版本取自请求发生时的记录；升级前未保存名称的历史记录显示原标识。正则和私网 IPv4 规则不保存原始命中文本。</p>
     </section>
     <section id="live" class="panel" hidden>
-      <div class="section-heading"><div><h1>实时日志</h1><p>开启后查看请求的处理阶段、响应状态和耗时。关闭页面后继续采集，重启程序后默认关闭。</p></div><button id="live-toggle" type="button" class="primary" disabled>正在读取…</button></div>
+      <div class="section-heading"><div><h1>实时日志</h1><p>并发状态始终可见；开启采集后记录请求阶段、状态和耗时。</p></div><button id="live-toggle" type="button" class="primary" disabled>正在读取…</button></div>
+      <div class="concurrency-panel">
+        <div class="concurrency-heading"><h2>当前并发占用</h2><p id="concurrency-state" role="status">正在读取并发状态…</p></div>
+        <div class="table-scroll concurrency-sessions-scroll"><table class="concurrency-table"><thead><tr><th>Session（匿名标签）</th><th>占用名额</th><th>HTTP</th><th>SSE</th><th>WebSocket</th><th>最长持续</th></tr></thead><tbody id="concurrency-sessions"></tbody></table></div>
+        <div class="concurrency-details">
+        <details><summary>活跃请求明细</summary><div class="table-scroll"><table class="concurrency-table"><thead><tr><th>请求 ID</th><th>Session / 标识来源</th><th>接口</th><th>协议</th><th>当前阶段</th><th>持续时间</th></tr></thead><tbody id="concurrency-requests"></tbody></table></div></details>
+        <details><summary>统计说明</summary><p class="hint">每秒刷新，无需开启日志采集。占用按 HTTP 请求或 WebSocket 连接统计；SSE 持续到响应流结束，WebSocket 包括已建立但空闲的连接。Session 读取 session_id / X-Session-ID 请求头或 client_metadata.session_id；未提供、无效或冲突的标识归为“未识别”，不代表同一个 Session。匿名标签在代理重启后变化。</p></details>
+        </div>
+      </div>
       <div class="live-toolbar">
         <label class="live-search">筛选<input id="live-search" placeholder="请求 ID、接口、规则名称或错误代码"></label>
         <label class="check"><input id="live-errors" type="checkbox">仅异常</label>

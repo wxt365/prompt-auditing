@@ -20,14 +20,23 @@ import (
 )
 
 type Values struct {
-	SetupRequired         bool   `json:"setup_required"`
-	AuthMode              string `json:"auth_mode"`
-	Listen                string `json:"listen"`
-	Upstream              string `json:"upstream"`
-	MaxBodyBytes          int64  `json:"max_body_bytes"`
-	MaxConcurrentRequests int    `json:"max_concurrent_requests"`
-	AuditRetentionDays    int    `json:"audit_retention_days"`
-	AuditMaxBytes         int64  `json:"audit_max_bytes"`
+	SetupRequired                bool   `json:"setup_required"`
+	AuthMode                     string `json:"auth_mode"`
+	Listen                       string `json:"listen"`
+	Upstream                     string `json:"upstream"`
+	MaxBodyBytes                 int64  `json:"max_body_bytes"`
+	MaxConcurrentRequests        int    `json:"max_concurrent_requests"`
+	UpstreamHeaderTimeoutSeconds int64  `json:"upstream_header_timeout_seconds"`
+	AuditRetentionDays           int    `json:"audit_retention_days"`
+	AuditMaxBytes                int64  `json:"audit_max_bytes"`
+}
+
+// 旧设置没有此字段时采用新默认值，已有自定义值保持不变。
+func (v Values) WithDefaults() Values {
+	if v.UpstreamHeaderTimeoutSeconds == 0 {
+		v.UpstreamHeaderTimeoutSeconds = config.DefaultUpstreamHeaderTimeoutSeconds
+	}
+	return v
 }
 
 const (
@@ -112,6 +121,7 @@ func Open(directory string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) Config(values Values) (config.Config, error) {
+	values = values.WithDefaults()
 	if values.AuthMode != "" && values.AuthMode != AuthClient && values.AuthMode != AuthGateway {
 		return config.Config{}, errors.New("认证方式无效")
 	}
@@ -121,7 +131,7 @@ func (s *Store) Config(values Values) (config.Config, error) {
 	return config.Prepare(config.Config{Version: 1, Listen: values.Listen, Upstream: values.Upstream,
 		PolicyDB: "policy.db", AuditDB: "audit.db", MaxBodyBytes: values.MaxBodyBytes,
 		MaxConcurrentRequests: values.MaxConcurrentRequests, AuditRetentionDays: values.AuditRetentionDays,
-		AuditMaxBytes: values.AuditMaxBytes}, s.directory)
+		AuditMaxBytes: values.AuditMaxBytes, UpstreamHeaderTimeoutSeconds: config.HeaderTimeoutSeconds(values.UpstreamHeaderTimeoutSeconds)}, s.directory)
 }
 
 func (s *Store) Load(ctx context.Context) (Values, string, string, error) {
@@ -138,6 +148,7 @@ func (s *Store) Load(ctx context.Context) (Values, string, string, error) {
 	if err := json.Unmarshal([]byte(raw), &values); err != nil {
 		return values, "", "", err
 	}
+	values = values.WithDefaults()
 	if _, err := s.Config(values); err != nil {
 		return values, "", "", err
 	}
@@ -163,6 +174,7 @@ func (s *Store) Load(ctx context.Context) (Values, string, string, error) {
 }
 
 func (s *Store) Save(ctx context.Context, values Values, token, key string) error {
+	values = values.WithDefaults()
 	if values.AuthMode == AuthClient {
 		key = ""
 	}

@@ -11,6 +11,29 @@ import (
 	"github.com/xiaotaowang/prompt-auditing/internal/settings"
 )
 
+func TestManagementSettingsExposeEffectiveHeaderTimeout(t *testing.T) {
+	for _, seconds := range []int64{0, 600} {
+		controller := &desktopController{values: settings.Values{UpstreamHeaderTimeoutSeconds: seconds}}
+		request := httptest.NewRequest("GET", "http://127.0.0.1:38123/api/settings", nil)
+		request.Header.Set("Authorization", "Bearer session")
+		response := httptest.NewRecorder()
+		controller.managementHandler("http://127.0.0.1:38123", "session").ServeHTTP(response, request)
+		var result struct {
+			Settings settings.Values `json:"settings"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil || response.Code != 200 {
+			t.Fatal(response.Body.String())
+		}
+		want := seconds
+		if want == 0 {
+			want = 300
+		}
+		if result.Settings.UpstreamHeaderTimeoutSeconds != want {
+			t.Fatalf("管理页未读取有效超时: %+v", result.Settings)
+		}
+	}
+}
+
 func TestManagementRequiresSessionAndRejectsForeignOrigins(t *testing.T) {
 	const origin = "http://127.0.0.1:38123"
 	controller := &desktopController{token: "private-client-token"}

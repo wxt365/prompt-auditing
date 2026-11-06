@@ -5,7 +5,57 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestUpstreamHeaderTimeoutDefaultsAndOverrides(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		seconds int64
+		want    time.Duration
+		invalid bool
+	}{
+		{"旧配置采用300秒", 0, 300 * time.Second, false},
+		{"允许缩短", 1, time.Second, false},
+		{"保留原30秒自定义值", 30, 30 * time.Second, false},
+		{"允许延长", 600, 600 * time.Second, false},
+		{"拒绝负值", -1, 0, true},
+		{"拒绝时长溢出", MaxUpstreamHeaderTimeoutSeconds + 1, 0, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			body := "version: 1\nupstream: https://example.invalid/v1\npolicy_db: policy.db\naudit_db: audit.db\n"
+			if test.seconds != 0 {
+				body += fmt.Sprintf("upstream_header_timeout_seconds: %d\n", test.seconds)
+			}
+			path := filepath.Join(dir, "gateway.yaml")
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			loaded, loadErr := Load(path)
+			prepared, prepareErr := Prepare(Config{Version: 1, Upstream: "https://example.invalid/v1", PolicyDB: "policy.db", AuditDB: "audit.db", UpstreamHeaderTimeoutSeconds: HeaderTimeoutSeconds(test.seconds)}, dir)
+			if test.invalid {
+				if loadErr == nil || prepareErr == nil {
+					t.Fatal("非法超时必须同时被 YAML 和桌面配置拒绝")
+				}
+				return
+			}
+			if loadErr != nil || prepareErr != nil || loaded.UpstreamHeaderTimeout != test.want || prepared.UpstreamHeaderTimeout != test.want {
+				t.Fatalf("超时未正确应用: YAML=%v %v 桌面=%v %v", loaded.UpstreamHeaderTimeout, loadErr, prepared.UpstreamHeaderTimeout, prepareErr)
+			}
+		})
+	}
+	for _, value := range []string{"1.5", "\"300s\"", "9223372036854775808"} {
+		path := filepath.Join(t.TempDir(), "gateway.yaml")
+		body := "version: 1\nupstream: https://example.invalid/v1\npolicy_db: policy.db\naudit_db: audit.db\nupstream_header_timeout_seconds: " + value + "\n"
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(path); err == nil {
+			t.Fatalf("非整数或溢出的秒数未拒绝: %s", value)
+		}
+	}
+}
 
 func TestBodyLimitDefaultsAndExplicitValues(t *testing.T) {
 	for _, test := range []struct {

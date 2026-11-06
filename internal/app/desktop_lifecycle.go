@@ -19,6 +19,7 @@ import (
 )
 
 type desktopGateway struct {
+	handler         *gateway.Handler
 	server          *http.Server
 	audit           *storage.AuditStore
 	transport       *http.Transport
@@ -195,7 +196,8 @@ func (c *desktopController) restartGateway() error {
 	}
 	var payloadError atomic.Value
 	handler, err := gateway.NewHandler(gateway.Options{Upstream: upstream, Client: client, Engine: engine, RequestLog: c.requestLog(),
-		Audit: auditor, LocalToken: state.token, UpstreamKey: state.key, ClientAuth: state.values.AuthMode == settings.AuthClient, Limits: config.LimitsConfig{
+		UpstreamHeaderTimeout: cfg.UpstreamHeaderTimeout,
+		Audit:                 auditor, LocalToken: state.token, UpstreamKey: state.key, ClientAuth: state.values.AuthMode == settings.AuthClient, Limits: config.LimitsConfig{
 			MaxCompressedBytes: cfg.MaxBodyBytes, MaxDecompressedBytes: cfg.MaxBodyBytes, MaxConcurrent: cfg.MaxConcurrentRequests}, PayloadError: func(detail string) { payloadError.Store(detail) }})
 	if err != nil {
 		auditor.Close()
@@ -207,7 +209,7 @@ func (c *desktopController) restartGateway() error {
 		return fmt.Errorf("无法监听代理地址 %s（端口可能已被占用或被系统限制），请更换本地监听端口: %w", cfg.Listen, err)
 	}
 	maintenance, cancel := context.WithCancel(ctx)
-	active := &desktopGateway{audit: auditor, transport: client.Transport.(*http.Transport), cancel: cancel,
+	active := &desktopGateway{handler: handler, audit: auditor, transport: client.Transport.(*http.Transport), cancel: cancel,
 		maintenanceDone: make(chan struct{}), serveDone: make(chan struct{}), version: rules.Version}
 	active.payloadError = &payloadError
 	active.server = &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -222,6 +224,7 @@ func (c *desktopController) restartGateway() error {
 		defer active.requests.Done()
 		handler.ServeHTTP(w, r)
 	}), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 1 << 20}
+	active.server.RegisterOnShutdown(handler.CloseWebSockets)
 	active.running.Store(true)
 	go func() { defer close(active.maintenanceDone); auditor.RunMaintenance(maintenance, time.Hour) }()
 	go func() {

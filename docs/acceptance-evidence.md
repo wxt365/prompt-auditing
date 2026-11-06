@@ -1,5 +1,11 @@
 # Codex Security Gateway MVP 验收证据矩阵
 
+> 2026-11-05 更新：`0.1.9` 调整实时日志的顶部间距、并发标题排版、默认折叠统计说明及 Session 列表滚动区域；管理页相关测试、HTML 标识/折叠状态及 JavaScript 语法检查通过。Windows amd64、macOS arm64 与 macOS Intel（amd64）三个桌面包构建完成，已核对架构、版本、紧凑布局资源、ZIP/UTF-8 文件名、包内外 SHA-256，以及两个 macOS 包解压后的执行权限和临时签名；Intel 包最低系统版本为 macOS 13。浏览器预览审批服务返回 429，未完成本版目视验收；Windows / Intel Mac 原生运行与真实上游联调仍未验证。
+
+> 2026-11-05 更新：`0.1.8` 测试包新增独立于日志采集的实时并发占用、匿名 Session 分组与活跃请求明细。`TestConcurrencyTracksRealSlotsIndependentlyOfLogs`、`TestConcurrencySessionIdentityBoundaries`、`TestConcurrencyWebSocketEventsShareOneSlot` 和 `TestManagementConcurrencyIndependentOfCaptureAndGatewayInstance` 覆盖名额获取/释放、满额拒绝、日志关闭/清空/淘汰、SSE、WebSocket 事件不重复计数、标识冲突及代理实例隔离；全量 `go test -race ./...`、`go vet ./...` 与页面 DOM 渲染检查通过。Windows amd64 / macOS arm64 构建和 ZIP、中文文件名、SHA-256 检查通过，macOS 为临时签名；未完成本版本原生 Windows 或真实客户端/模型服务联调。
+
+> 2026-11-03 更新：`0.1.7` 测试包补充 Responses WebSocket 与响应查询双路径。`TestResponsesWebSocketAliasesAuditEveryTurn`、`TestResponsesWebSocketCannotBypassInspection`、`TestResponsesWebSocketAuditFailureAndShutdown`、`TestResponsesWebSocketClientAuthAndConcurrency`、`TestResponsesWebSocketUpstreamErrorsRedactCredentials` 和响应查询测试覆盖本机模拟上游；完整回归与网关竞态检测通过。边界见 [Responses 长连接与查询](responses-websocket.md)，尚未完成真实客户端 / 上游及 Windows 原生联调，不将下表旧 HTTP / SSE 验收结论视为 WebSocket 原生验收。
+
 | 项目 | 内容 |
 | --- | --- |
 | 权威设计 | `docs/codex-security-gateway-mvp-design.md` 0.7 |
@@ -12,6 +18,10 @@
 > 2026-10-30 更新：默认请求体上限先从 5 MiB 调整为 100 MiB（已发布 0.1.3 包），随后源码按官方图片接口大小要求放宽为 1 GiB，管理页允许继续调大，旧的显式限制保留。下表 AC-015 的 5 MiB 描述为历史记录，不代表当前默认值；原性能数据不证明 1 GiB 请求或大请求并发性能。
 
 ## AC 证据
+
+2026-11-06 源码回归：上游响应头等待默认改为 300 秒，支持桌面连接设置及 YAML 的 `upstream_header_timeout_seconds`。`TestUpstreamHeaderTimeoutDefaultsAndOverrides`、`TestSettingsHeaderTimeoutCompatibility`、`TestConfiguredHeaderTimeoutReachesHTTPTransport`、`TestManagementSettingsExposeEffectiveHeaderTimeout` 和 `TestResponsesWebSocketUsesConfiguredHandshakeTimeout` 覆盖旧配置默认、自定义值、非法输入、HTTP Transport 与 WebSocket 握手配置；`go test -race ./...` 通过。测试使用本机模拟上游，不证明真实图片生成成功；本轮未构建分发包，已分发的 0.1.9 包仍采用旧超时。
+
+2026-11-06 后续打包：按用户明确要求生成 `0.1.10` 的 Windows amd64、macOS arm64 和 macOS amd64 三个桌面 ZIP 包，保留旧版。三包均通过 ZIP CRC、中文文件名 UTF-8 标志、包内及外部 SHA-256、二进制版本字符串、目标架构检查；Windows 为 PE32+ GUI，macOS 两种架构均通过严格临时签名校验。包内说明包含 300 秒默认值及配置入口。未启动桌面实例或访问真实上游；Windows 和 Intel Mac 未进行目标机原生运行，Windows 未签名，macOS 未公证。
 
 | AC | 状态 | 当前证据 | 未闭合项 |
 | --- | --- | --- | --- |

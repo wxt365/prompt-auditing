@@ -1,5 +1,15 @@
 # macOS 菜单栏版使用说明
 
+## 0.1.10 测试包
+
+本版将上游响应头等待时间默认改为 300 秒，可在连接设置中调整；保留实时日志紧凑布局及 Session 并发统计。提供 Apple Silicon（arm64）和 Intel（amd64）两个独立包，均要求 macOS 13 或更新版本；Intel 包已交叉构建，尚未在 Intel Mac 原生运行验证。
+
+自 0.1.8 起支持实时并发监控：进入“实时日志”即可每秒查看当前占用 / 上限、按匿名 Session 汇总的 HTTP / SSE / WebSocket 占用，以及活跃请求明细，无需开启日志采集。缺少或冲突的 Session 标识归入“未识别”；空闲 WebSocket 仍占一个名额。具体口径见“规则、日志与退出”。
+
+本包支持 Responses、Chat Completions、图片生成、图片编辑及模型列表的带 `/v1` 和无前缀两种入口，并支持 Chat Completions 标准 `image_url` 图片消息。新增 `GET /v1/responses` 与 `GET /responses` 的 WebSocket 连接，以及两种路径下的指定响应 GET 查询；WebSocket 内每条客户端事件均经过检测与审计，普通无 ID、无协议升级的 GET 仍返回 405。详见同目录 [Responses 长连接与查询](responses-websocket.md) 和 [图片接口说明](image-endpoints.md)。
+
+升级前从菜单栏退出旧实例，备份整个数据目录，再启动新版，保留现有设置与规则。从 `0.1.5`、`0.1.6` 或 `0.1.7` 升级不新增数据库迁移；更早版本可能升级至 Schema 4，回退需恢复相应备份。已完成本机模拟上游验证，尚未进行本版本与真实客户端、模型服务的联调。
+
 ## 安装与启动
 
 适用于 macOS 13 或更新版本。Apple Silicon 使用 `arm64` 包，Intel Mac 使用 `amd64` 包；实际原生验证范围见文末。
@@ -46,11 +56,17 @@ curl http://127.0.0.1:18080/images/edits \
 
 “检查上游连接”只发送不带认证的 `HEAD <上游地址>/models`，最多等待 5 秒；收到 401、404 或其他 HTTP 状态只代表网络与 HTTP 可达，不代表模型调用成功。
 
+自 0.1.10 起默认等待上游响应头 300 秒，可在“连接设置 → 请求限制与审计保留 → 上游响应头等待时间（秒）”填写正整数并保存应用。未设置该字段的旧配置升级后采用 300 秒，已有自定义值保留。此设置适用于所有代理 HTTP 请求和 WebSocket 握手，不是整个图片生成或流式响应的总时限；连接检查仍为 5 秒，客户端超时独立生效。已分发的 0.1.9 及更早包仍为原来的 30 秒，需升级至 0.1.10 才支持此参数。
+
 ## 规则、日志与退出
 
 “安全规则”支持中文名称、关键字拦截、替换、正则和私网 IPv4 检测，保存后应用。先替换，再检查替换结果；模型名、角色、工具名称和 JSON 键名不会被替换，替换规则命中不可替换字段时阻断。
 
 “审计日志”查询持久记录；阻断记录保存凭证脱敏后的请求 JSON。“实时日志”默认关闭，开启后内存保留最近 500 条请求元信息，退出程序后清空。
+
+“实时日志”顶部的“当前并发占用”每秒刷新实际占用和上限、Session 分组，以及活跃请求的接口、协议、阶段和持续时间，无需开启采集，清空日志也不影响统计。HTTP/SSE 在请求处理结束后释放名额；WebSocket 整条连接占一个名额，包括空闲连接，连接内事件不重复计数。限流仍为所有客户端共享，满额直接拒绝，不按 Session 分配额度。
+
+Session 读取 `session_id` 或 `X-Session-ID` 请求头，也识别 JSON 的 `client_metadata.session_id`（WebSocket 支持 `response.client_metadata.session_id`）。标识仅用于观察，不作为身份认证；未提供、无效或相互冲突时归入“未识别”，不能据此推断真实 Session 数。标识限 256 字节的字母、数字、下划线、连字符或点。页面只返回当前代理实例内稳定的匿名标签，重启后变化，不保存原始 Session 标识。读取正文前暂时可能显示未识别；连接内出现不同标识后将保持未识别，避免将多 Session 的复用连接误归给单一 Session。
 
 关闭浏览器后代理继续运行。从菜单栏点击“打开管理界面”可重新进入；点击“退出”停止代理并回收数据库。在途请求最多等待 15 秒，之后终止仍未结束的连接。
 
@@ -67,11 +83,11 @@ curl http://127.0.0.1:18080/images/edits \
 需要 Go 1.26.5 和 Xcode Command Line Tools；运行程序无需安装 Go、Python 或 Node.js。
 
 ```bash
-bash scripts/build-macos-package.sh 0.1.3 arm64
+bash scripts/build-macos-package.sh 0.1.9 arm64
 # Intel 构建：将 arm64 改为 amd64
 ```
 
-产物在 `dist/codex-gateway-macos-arm64-0.1.3/` 和同名 ZIP 中，包含 `.app`、本说明和 SHA-256 文件。构建拒绝覆盖已有同版本产物。
+产物在 `dist/codex-gateway-macos-arm64-0.1.9/` 和同名 ZIP 中，包含 `.app`、本说明和 SHA-256 文件；Intel 包名称中的架构为 `amd64`。构建拒绝覆盖已有同版本产物。
 
 桌面版使用 CGO 调用系统 AppKit 和 Security 框架；原有 `scripts/build-release.sh` 仍生成无 CGO 的 CLI 以及 Windows 桌面版，不包含 macOS `.app`。
 
